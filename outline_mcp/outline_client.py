@@ -50,7 +50,12 @@ class OutlineClient:
     _client_pool: ClassVar[httpx.AsyncClient | None] = None
     _rate_limit_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
 
-    def __init__(self, api_key: str | None = None, api_url: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_url: str | None = None,
+        auth_headers: dict[str, str] | None = None,
+    ):
         """
         Initialize the Outline client.
 
@@ -80,10 +85,14 @@ class OutlineClient:
 
         self.api_key = sanitized_key
         self.api_url = sanitized_url
+        # Pluggable auth: when provided, these headers replace the default
+        # ``Authorization: Bearer <api_key>`` (e.g. proxy-injected identity like
+        # ``X-Auth-Request-Email`` on a trusted internal network).
+        self._auth_headers_override = dict(auth_headers) if auth_headers else None
 
         # Ensure API key is provided.
         # sanitized_key will be None or empty string if invalid
-        if not self.api_key:
+        if not self.api_key and not self._auth_headers_override:
             raise OutlineError(
                 "Missing API key. Set OUTLINE_API_KEY in "
                 ".mcp-outline.env (project) or "
@@ -140,6 +149,16 @@ class OutlineClient:
         """Async context manager exit."""
         # Note: Don't close the shared pool here
         pass
+
+    def _auth_header_dict(self) -> dict[str, str]:
+        """Return the auth headers for a request.
+
+        Defaults to ``Authorization: Bearer <api_key>``; replaced wholesale by
+        ``auth_headers`` when one was supplied at construction.
+        """
+        if self._auth_headers_override is not None:
+            return dict(self._auth_headers_override)
+        return {"Authorization": f"Bearer {self.api_key}"}
 
     @classmethod
     async def close_pool(cls):
@@ -213,7 +232,7 @@ class OutlineClient:
         # Join base URL and endpoint (api_url is already normalized)
         url = f"{self.api_url}/{endpoint.lstrip('/')}"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **self._auth_header_dict(),
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -648,7 +667,7 @@ class OutlineClient:
 
         url = f"{self.api_url}/attachments.redirect"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **self._auth_header_dict(),
             "Content-Type": "application/json",
         }
 
@@ -738,7 +757,7 @@ class OutlineClient:
 
         url = f"{self.api_url}/attachments.redirect"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **self._auth_header_dict(),
             "Content-Type": "application/json",
         }
 
