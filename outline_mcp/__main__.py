@@ -132,6 +132,16 @@ def main() -> None:
         return
 
     if server_mode == ServerMode.HTTP:
+        # Moneta fork: in the devstack (COGNITO_USER_POOL_ID set) FastMCP's
+        # AWSCognitoProvider is the sole auth layer — delegate to the fork's
+        # Cognito HTTP server. The header-auth path below is the fallback for
+        # non-devstack installs.
+        from outline_mcp.moneta import http as moneta_http
+
+        if moneta_http.enabled():
+            moneta_http.run()
+            return
+
         cors = [
             Middleware(
                 CORSMiddleware,
