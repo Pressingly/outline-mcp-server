@@ -61,9 +61,23 @@ async def get_outline_client() -> OutlineClient:
             be constructed.
     """
     try:
+        # Moneta fork: on the Cognito path, return a client authenticated with the
+        # user's minted Outline API key (bootstrapped via X-Auth-Request-Email,
+        # then used as a Bearer) against Outline's internal URL. Returns None for
+        # non-Cognito paths (stdio / x-outline-api-key header), which the env/header
+        # resolution below handles. Lazy import avoids a cycle (apitoken imports
+        # OutlineClientError from here) and keeps the upstream base clean.
+        from outline_mcp.moneta.apitoken import build_outline_client
+
+        moneta_client = await build_outline_client()
+        if moneta_client is not None:
+            return moneta_client
+
         api_key = get_resolved_api_key() or None
         api_url = os.getenv("OUTLINE_API_URL")
         return OutlineClient(api_key=api_key, api_url=api_url)
+    except OutlineClientError:
+        raise  # already a usable error (e.g. mint failed) — don't double-wrap
     except OutlineError as exc:
         raise OutlineClientError(f"Outline client error: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — surface any init failure uniformly
