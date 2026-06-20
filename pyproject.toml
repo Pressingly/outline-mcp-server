@@ -17,6 +17,15 @@ dependencies = [
     "pydantic>=2.0.0",
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
+    # --- Moneta fork (AWS Cognito / mPass) ---
+    # Decode the Cognito id_token to forward the right Outline identity
+    # (outline_mcp/moneta/cognito.py). Present transitively via fastmcp; pinned
+    # because we import it directly.
+    "pyjwt>=2.0.0",
+    # Redis-backed, TLS-capable OAuth-state store for the Cognito provider
+    # (outline_mcp/moneta/storage.py). Pin matches FastMCP's transitive
+    # py-key-value-aio constraint.
+    "py-key-value-aio[redis]>=0.4.4,<0.5.0",
 ]
 
 [project.optional-dependencies]
