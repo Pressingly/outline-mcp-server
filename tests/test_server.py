@@ -44,3 +44,30 @@ def test_resolved_api_key_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Outside a request context, the env var supplies the key."""
     monkeypatch.setenv("OUTLINE_API_KEY", "ol_api_test")
     assert client_mod.get_resolved_api_key() == "ol_api_test"
+
+
+async def test_enabled_tools_filters_to_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OUTLINE_MCP_ENABLED_TOOLS limits the server to only the listed tools."""
+    monkeypatch.setenv("OUTLINE_MCP_ENABLED_TOOLS", "search_documents,read_document")
+    names = await _tool_names(get_stdio_mcp())
+    assert names == {"search_documents", "read_document"}
+
+
+async def test_enabled_tools_overrides_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OUTLINE_MCP_ENABLED_TOOLS takes precedence over OUTLINE_READ_ONLY.
+
+    Even with READ_ONLY=true, an explicit allow-list that includes a write
+    tool must surface that tool.
+    """
+    monkeypatch.setenv("OUTLINE_READ_ONLY", "true")
+    monkeypatch.setenv("OUTLINE_MCP_ENABLED_TOOLS", "create_document,search_documents")
+    names = await _tool_names(get_stdio_mcp())
+    assert "create_document" in names
+    assert "search_documents" in names
+
+
+async def test_enabled_tools_empty_registers_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty OUTLINE_MCP_ENABLED_TOOLS behaves like unset (all tools)."""
+    monkeypatch.setenv("OUTLINE_MCP_ENABLED_TOOLS", "")
+    names = await _tool_names(get_stdio_mcp())
+    assert len(names) >= 20
