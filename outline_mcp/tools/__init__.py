@@ -245,8 +245,8 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
     @mcp.tool(
         description=(
             "Lists ALL available Outline tools grouped by category, showing "
-            "which are currently enabled. Use this to discover tools before "
-            "calling enable_tools to activate the ones you need."
+            "which are currently enabled. Tools marked 'not yet enabled' ARE "
+            "available — call enable_tools to activate them before use."
         )
     )
     async def list_available_tools() -> str:
@@ -269,7 +269,7 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
         for category, tools in sorted(by_category.items()):
             lines.append(f"\n## {category}")
             for t in sorted(tools, key=lambda x: x["name"]):
-                status = "[enabled]" if t["enabled"] else "[disabled]"
+                status = "[enabled]" if t["enabled"] else "[not yet enabled — call enable_tools]"
                 lines.append(f"  - {t['name']} {status}")
                 if t["description"]:
                     # Show first sentence of the description.
@@ -280,16 +280,16 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
         enabled_count = len(currently_enabled)
         header = (
             f"Outline MCP Tools: {enabled_count}/{total} enabled\n"
-            "Use enable_tools(tool_names=[...]) to activate disabled tools."
+            f"{total - enabled_count} more tools are available and ready to use — "
+            "call enable_tools(tool_names=[...]) to activate them.\n"
         )
         return header + "\n".join(lines)
 
     @mcp.tool(
         description=(
-            "Dynamically enables additional Outline tools by name. "
-            "Call list_available_tools first to see what's available. "
-            "Pass a list of tool names to enable. Tools from the same module "
-            "may also be enabled as a side effect."
+            "REQUIRED before using any non-default tool. Activates additional "
+            "Outline tools by name so you can call them. Call "
+            "list_available_tools first to see what's available."
         )
     )
     async def enable_tools(tool_names: list[str]) -> str:
