@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 from types import ModuleType
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
@@ -92,7 +93,7 @@ _DEFAULT_TOOLS = frozenset(
 )
 
 # Names of the two meta tools — always registered, never pruned or catalogued.
-_META_TOOL_NAMES = frozenset({"list_available_tools", "enable_tools"})
+_META_TOOL_NAMES = frozenset({"list_available_tools", "enable_tools", "execute_tool"})
 
 
 def _flag(name: str) -> bool:
@@ -101,11 +102,7 @@ def _flag(name: str) -> bool:
 
 def _registered_tool_names(mcp: FastMCP) -> set[str]:
     """Return the names of all currently registered tools."""
-    return {
-        c.name
-        for c in mcp.local_provider._components.values()
-        if isinstance(c, Tool)
-    }
+    return {c.name for c in mcp.local_provider._components.values() if isinstance(c, Tool)}
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +114,7 @@ def _registered_tool_names(mcp: FastMCP) -> set[str]:
 _ToolCatalog = dict[str, dict]
 
 
-def _build_catalog(
-    mcp: FastMCP, modules: tuple[ModuleType, ...]
-) -> _ToolCatalog:
+def _build_catalog(mcp: FastMCP, modules: tuple[ModuleType, ...]) -> _ToolCatalog:
     """Register *modules* one-by-one and record which tools each provides.
 
     Returns a catalog mapping ``tool_name`` to metadata.  The catalog
@@ -147,6 +142,7 @@ def _build_catalog(
                 "description": (tool_obj.description or "")[:200] if tool_obj else "",
                 "category": category,
                 "module": mod,
+                "component": tool_obj,
             }
     return catalog
 
@@ -240,7 +236,7 @@ def register_tools(mcp: FastMCP) -> None:
 
 
 def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
-    """Register ``list_available_tools`` and ``enable_tools``."""
+    """Register ``list_available_tools``, ``enable_tools``, and ``execute_tool``."""
 
     @mcp.tool(
         description=(
@@ -275,6 +271,15 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
                     # Show first sentence of the description.
                     first_sentence = t["description"].split("\n")[0].strip()
                     lines.append(f"    {first_sentence}")
+                # Include parameter schema when available.
+                comp = catalog[t["name"]].get("component") if t["name"] in catalog else None
+                if comp and hasattr(comp, "parameters"):
+                    params = comp.parameters or {}
+                    if "properties" in params:
+                        param_names = list(params["properties"].keys())
+                        required = params.get("required", [])
+                        param_list = ", ".join(f"{p} (required)" if p in required else p for p in param_names)
+                        lines.append(f"    Parameters: {param_list}")
 
         total = len(catalog)
         enabled_count = len(currently_enabled)
@@ -295,10 +300,7 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
     async def enable_tools(tool_names: list[str]) -> str:
         """Enable tools by name, registering their parent modules."""
         if not tool_names:
-            return (
-                "No tool names provided. "
-                "Call list_available_tools to see available tools."
-            )
+            return "No tool names provided. Call list_available_tools to see available tools."
 
         valid: list[str] = []
         invalid: list[str] = []
@@ -336,13 +338,30 @@ def _register_meta_tools(mcp: FastMCP, catalog: _ToolCatalog) -> None:
         if extras:
             parts.append(f"Also enabled (same module): {', '.join(extras)}")
         if already_enabled:
-            parts.append(
-                f"Already enabled: {', '.join(sorted(already_enabled))}"
-            )
+            parts.append(f"Already enabled: {', '.join(sorted(already_enabled))}")
         if invalid:
-            parts.append(
-                "Not found in catalog (check spelling): "
-                f"{', '.join(sorted(invalid))}"
-            )
+            parts.append(f"Not found in catalog (check spelling): {', '.join(sorted(invalid))}")
 
         return "\n".join(parts) if parts else "No changes made."
+
+    @mcp.tool(
+        description=(
+            "Execute any available tool by name. Use list_available_tools "
+            "first to discover tool names and their parameters, then call "
+            "this with the tool name and arguments dict."
+        )
+    )
+    async def execute_tool(tool_name: str, arguments: dict) -> Any:
+        """Execute a cataloged tool via proxy."""
+        if tool_name in _META_TOOL_NAMES:
+            return {"error": f"Meta tool '{tool_name}' must be called directly"}
+        entry = catalog.get(tool_name)
+        if entry is None:
+            return {
+                "error": f"Unknown tool: {tool_name}",
+                "hint": "Call list_available_tools to see available tools",
+            }
+        comp = entry.get("component")
+        if comp is None:
+            return {"error": f"Tool '{tool_name}' has no callable component"}
+        return await comp.run(arguments)
