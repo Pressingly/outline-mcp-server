@@ -15,11 +15,12 @@ async def _tool_names(mcp) -> set[str]:
 async def test_stdio_registers_default_tools() -> None:
     """The stdio server registers the default tool set + meta tools."""
     names = await _tool_names(get_stdio_mcp())
-    # 5 defaults + 2 meta tools (list_available_tools, enable_tools)
+    # 5 defaults + 3 meta tools (list_available_tools, enable_tools, execute_tool)
     assert "search_documents" in names
     assert "list_available_tools" in names
     assert "enable_tools" in names
-    assert len(names) == 7
+    assert "execute_tool" in names
+    assert len(names) == 8
 
 
 async def test_read_only_mode_drops_write_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,7 +43,8 @@ async def test_http_factory_builds() -> None:
     names = await _tool_names(get_http_mcp())
     assert "list_available_tools" in names
     assert "enable_tools" in names
-    assert len(names) == 7
+    assert "execute_tool" in names
+    assert len(names) == 8
 
 
 def test_resolved_api_key_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,7 +61,8 @@ async def test_enabled_tools_overrides_defaults(monkeypatch: pytest.MonkeyPatch)
     assert "read_document" in names
     assert "list_available_tools" in names
     assert "enable_tools" in names
-    assert len(names) == 4
+    assert "execute_tool" in names
+    assert len(names) == 5
 
 
 async def test_enabled_tools_empty_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,4 +71,5 @@ async def test_enabled_tools_empty_uses_defaults(monkeypatch: pytest.MonkeyPatch
     names = await _tool_names(get_stdio_mcp())
     assert "search_documents" in names
     assert "list_available_tools" in names
-    assert len(names) == 7
+    assert "execute_tool" in names
+    assert len(names) == 8
