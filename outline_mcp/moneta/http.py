@@ -125,6 +125,9 @@ def get_cognito_http_mcp() -> FastMCP:
     upstream_auth_url = os.getenv("COGNITO_UPSTREAM_AUTH_URL", "").strip()
     if upstream_auth_url:
         provider._upstream_authorization_endpoint = upstream_auth_url
+    upstream_token_url = os.getenv("COGNITO_UPSTREAM_TOKEN_URL", "").strip()
+    if upstream_token_url:
+        provider._upstream_token_endpoint = upstream_token_url
     logger.info(
         "Cognito provider: pool=%s region=%s client_id=%s base_url=%s scopes=%s secret=%s signing_key=%s "
         "storage=%s outline_public=%s outline_internal=%s",
