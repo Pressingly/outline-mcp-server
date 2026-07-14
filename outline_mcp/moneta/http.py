@@ -117,14 +117,14 @@ def get_cognito_http_mcp() -> FastMCP:
         jwt_signing_key=jwt_signing_key,
     )
 
-    # AWSCognitoProvider doesn't expose extra_authorize_params, but the
-    # underlying OAuthProxy stores them on _extra_authorize_params and injects
-    # them into every /authorize redirect. When the Cognito user pool has
-    # multiple IdPs (native + federated mPass), Cognito shows its hosted UI
-    # instead of auto-redirecting; identity_provider forces the redirect.
-    cognito_idp = os.getenv("COGNITO_IDENTITY_PROVIDER", "").strip()
-    if cognito_idp:
-        provider._extra_authorize_params["identity_provider"] = cognito_idp
+    # AWSCognitoProvider fetches the authorization_endpoint from Cognito's OIDC
+    # discovery, which points at Cognito's hosted UI. In deployments where an
+    # auth proxy (e.g. mpass-auth-proxy) sits in front of Cognito and provides
+    # the actual login page, override the authorize redirect so users land on
+    # the proxy instead of raw Cognito.
+    upstream_auth_url = os.getenv("COGNITO_UPSTREAM_AUTH_URL", "").strip()
+    if upstream_auth_url:
+        provider._upstream_authorization_endpoint = upstream_auth_url
     logger.info(
         "Cognito provider: pool=%s region=%s client_id=%s base_url=%s scopes=%s secret=%s signing_key=%s "
         "storage=%s outline_public=%s outline_internal=%s",
