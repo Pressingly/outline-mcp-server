@@ -45,15 +45,6 @@ logger = logging.getLogger("fastmcp.outline_mcp.moneta")
 
 _DEFAULT_HTTP_PORT = 8213
 
-# Default redirect URIs cover Claude Desktop, Cursor, and MCP Inspector on a
-# developer laptop. Non-localhost MCP clients must be listed via
-# MCP_ALLOWED_CLIENT_REDIRECT_URIS to register at /register (the DCR shim).
-_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS: tuple[str, ...] = (
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*",
-)
-
-
 def enabled() -> bool:
     """True when the Cognito HTTP path should handle ``http`` mode."""
     on = bool(os.getenv("COGNITO_USER_POOL_ID", "").strip())
@@ -65,17 +56,21 @@ def enabled() -> bool:
     return on
 
 
-def _allowed_client_redirect_uris() -> list[str]:
+def _allowed_client_redirect_uris() -> list[str] | None:
     """Parse MCP_ALLOWED_CLIENT_REDIRECT_URIS (comma-separated; fnmatch wildcards).
 
-    Unset/empty → localhost defaults. Do not allow arbitrary redirect URIs — they
-    let an attacker DCR-register a malicious client and exfiltrate user tokens.
+    Unset/empty → None (allow all), matching penpot-mcp's behaviour so SMBs
+    can deploy with any MCP client without pre-configuring callback URLs.
     """
     raw = os.getenv("MCP_ALLOWED_CLIENT_REDIRECT_URIS", "").strip()
     if not raw:
-        return list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
+        logger.warning(
+            "MCP_ALLOWED_CLIENT_REDIRECT_URIS is unset — dynamic client registration "
+            "accepts any redirect_uri. Set an allow-list for hardened deployments."
+        )
+        return None
     allowed = [uri.strip() for uri in raw.split(",") if uri.strip()]
-    return allowed or list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
+    return allowed or None
 
 
 def _required_scopes() -> list[str]:
