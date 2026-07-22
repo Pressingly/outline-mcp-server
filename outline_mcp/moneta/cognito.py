@@ -89,8 +89,8 @@ def _true_expires_in(token_response: dict[str, Any]) -> int | None:
     invariant: the client's token now expires when the upstream one does, and it
     renews through the refresh grant (which ``mpass-auth-proxy`` relays to Cognito)
     rather than re-authorizing. Note this makes the client-facing token hourly too
-    — decoupling the two needs ``fastmcp_access_token_expiry_seconds``, which only
-    exists in fastmcp >= 3.4 and so is not used here.
+    — decoupling the two needs ``fastmcp_access_token_expiry_seconds``, absent from
+    the fastmcp 3.2.x line the sibling MCP servers pin, so it is not used here.
 
     Returns ``None`` when the lifetime can't be determined, leaving the upstream
     value untouched.
