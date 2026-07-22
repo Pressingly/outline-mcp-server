@@ -59,8 +59,8 @@ COGNITO_USERNAME_CLAIM = "cognito:username"
 
 # Floor for a corrected `expires_in`, so a token that is already at (or past) its
 # `exp` still yields a positive lifetime instead of a negative one. A non-positive
-# value would collapse the JTI-mapping TTL and evict the upstream token set
-# outright. The trade is a deliberate ≤60s window — for a token that arrives
+# value would collapse the JTI-mapping TTL and drop the session's access-token
+# reference (the upstream store floors its own TTL). The trade is a deliberate ≤60s window — for a token that arrives
 # already expired, refresh stays gated while JWKS validation already fails —
 # after which the refresh grant recovers the session.
 MIN_EXPIRES_IN_SECONDS = 60
