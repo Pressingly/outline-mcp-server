@@ -8,6 +8,7 @@ never fires and the client is bounced through a full re-authorization every hour
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import httpx
@@ -19,6 +20,7 @@ from fastmcp.server.auth.providers.aws import AWSCognitoProvider
 from outline_mcp.moneta.cognito import (
     MIN_EXPIRES_IN_SECONDS,
     OutlineCognitoProvider,
+    _already_truthful,
     _correct_expires_in,
     _true_expires_in,
 )
@@ -64,16 +66,33 @@ def test_correct_expires_in_replaces_the_inflated_lifetime():
 
 
 def test_correct_expires_in_preserves_the_rest_of_the_response():
-    body = {"access_token": _access_token(3600), "id_token": "id", "refresh_token": "r", "expires_in": _INFLATED_EXPIRES_IN}
+    body = {
+        "access_token": _access_token(3600),
+        "id_token": "id",
+        "refresh_token": "r",
+        "expires_in": _INFLATED_EXPIRES_IN,
+    }
     corrected = _correct_expires_in(_token_response(body)).json()
     assert corrected["id_token"] == "id"
     assert corrected["refresh_token"] == "r"
 
 
-def test_correct_expires_in_keeps_an_already_truthful_lifetime():
-    """Talking straight to Cognito already yields a real lifetime — leave it be."""
+def test_correct_expires_in_hands_back_an_already_truthful_response_untouched():
+    """Talking straight to Cognito already yields a real lifetime — leave it be.
+
+    ``_true_expires_in`` truncates fractional seconds, so the honest value comes
+    back a second short; that drift must not count as a mismatch or every
+    direct-to-Cognito exchange would be needlessly rebuilt.
+    """
     response = _token_response({"access_token": _access_token(3600), "expires_in": 3600})
-    assert _correct_expires_in(response).json()["expires_in"] == pytest.approx(3600, abs=2)
+
+    assert _correct_expires_in(response) is response
+
+
+@pytest.mark.parametrize("reported", ["3600", None, True, {"n": 3600}])
+def test_already_truthful_rejects_non_numeric_values(reported):
+    """A non-numeric `expires_in` is not a match — the response must be corrected."""
+    assert _already_truthful(reported, 3600) is False
 
 
 @pytest.mark.parametrize(
@@ -102,3 +121,38 @@ def test_provider_registers_the_hook_on_both_grants(monkeypatch):
 
     assert _correct_expires_in in hooks["access_token_response"]
     assert _correct_expires_in in hooks["refresh_token_response"]
+
+
+def test_authlib_invokes_the_hook_on_both_grants():
+    """Guards the hook contract: authlib calls compliance hooks as ``resp -> resp``.
+
+    Membership alone can't catch a signature change upstream (authlib's
+    ``refresh_token_request`` hook, for instance, takes ``(url, headers, body)``),
+    so drive a real client through both grants.
+    """
+    token_url = "https://auth.example.test/token"
+    body = {
+        "access_token": _access_token(3600),
+        "id_token": "id",
+        "refresh_token": "r",
+        "token_type": "Bearer",
+        "expires_in": _INFLATED_EXPIRES_IN,
+    }
+
+    async def _run():
+        client = AsyncOAuth2Client(
+            client_id="stub",
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+        )
+        client.register_compliance_hook("access_token_response", _correct_expires_in)
+        client.register_compliance_hook("refresh_token_response", _correct_expires_in)
+        async with client:
+            exchanged = await client.fetch_token(url=token_url, grant_type="authorization_code", code="c")
+            refreshed = await client.refresh_token(url=token_url, refresh_token="r")
+        return exchanged, refreshed
+
+    exchanged, refreshed = asyncio.run(_run())
+
+    assert exchanged["expires_in"] == pytest.approx(3600, abs=2)
+    assert refreshed["expires_in"] == pytest.approx(3600, abs=2)
+    assert exchanged["id_token"] == "id"

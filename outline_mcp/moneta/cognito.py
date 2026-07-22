@@ -58,8 +58,17 @@ EMAIL_CLAIM = "email"
 COGNITO_USERNAME_CLAIM = "cognito:username"
 
 # Floor for a corrected `expires_in`, so a token that is already at (or past) its
-# `exp` still yields a positive lifetime instead of a negative one.
+# `exp` still yields a positive lifetime instead of a negative one. A non-positive
+# value would collapse the JTI-mapping TTL and evict the upstream token set
+# outright. The trade is a deliberate ≤60s window — for a token that arrives
+# already expired, refresh stays gated while JWKS validation already fails —
+# after which the refresh grant recovers the session.
 MIN_EXPIRES_IN_SECONDS = 60
+
+# `_true_expires_in` truncates fractional seconds, so a lifetime the upstream
+# already reported honestly comes back one second short. Treat that as a match
+# and hand the original response straight through.
+EXPIRES_IN_DRIFT_TOLERANCE_SECONDS = 1
 
 
 def _true_expires_in(token_response: dict[str, Any]) -> int | None:
@@ -71,12 +80,17 @@ def _true_expires_in(token_response: dict[str, Any]) -> int | None:
     underneath still expires in one hour.
 
     On the MCP path the session authority is FastMCP's ``OAuthProxy``, which keys
-    transparent refresh off ``expires_in``: it stores ``expires_at = now +
-    expires_in`` and only refreshes once that moment is reached. With the 7-day
-    value the stored expiry is a week out, so at the one-hour mark JWKS validation
-    of the real token fails while the refresh gate stays shut — the request 401s
-    and the MCP client is forced through a full interactive re-authorization.
-    Deriving the value from the token's own ``exp`` restores the invariant.
+    renewal off ``expires_in``: it stores ``expires_at = now + expires_in`` and
+    stamps the token it issues to the MCP client with the same lifetime. With the
+    7-day value the stored expiry is a week out, so at the one-hour mark JWKS
+    validation of the real token fails while the refresh gate stays shut — the
+    request 401s and the MCP client is forced through a full interactive
+    re-authorization. Deriving the value from the token's own ``exp`` restores the
+    invariant: the client's token now expires when the upstream one does, and it
+    renews through the refresh grant (which ``mpass-auth-proxy`` relays to Cognito)
+    rather than re-authorizing. Note this makes the client-facing token hourly too
+    — decoupling the two needs ``fastmcp_access_token_expiry_seconds``, which only
+    exists in fastmcp >= 3.4 and so is not used here.
 
     Returns ``None`` when the lifetime can't be determined, leaving the upstream
     value untouched.
@@ -98,6 +112,13 @@ def _true_expires_in(token_response: dict[str, Any]) -> int | None:
     return max(int(exp - time.time()), MIN_EXPIRES_IN_SECONDS)
 
 
+def _already_truthful(reported: Any, corrected: int) -> bool:
+    """True when the upstream already reported the token's real lifetime."""
+    if isinstance(reported, bool) or not isinstance(reported, (int, float)):
+        return False
+    return abs(reported - corrected) <= EXPIRES_IN_DRIFT_TOLERANCE_SECONDS
+
+
 def _correct_expires_in(response: httpx.Response) -> httpx.Response:
     """authlib compliance hook rewriting ``expires_in`` to the token's real value.
 
@@ -115,7 +136,7 @@ def _correct_expires_in(response: httpx.Response) -> httpx.Response:
         return response
 
     corrected = _true_expires_in(body)
-    if corrected is None or body.get("expires_in") == corrected:
+    if corrected is None or _already_truthful(body.get("expires_in"), corrected):
         return response
 
     logger.debug(
@@ -137,7 +158,8 @@ class OutlineCognitoProvider(AWSCognitoProvider):
     Three overrides cooperate:
 
     * :meth:`_create_upstream_oauth_client` corrects the upstream ``expires_in``
-      so transparent refresh fires on time (see :func:`_true_expires_in`).
+      so the session renews instead of forcing an hourly re-authorization
+      (see :func:`_true_expires_in`).
     * :meth:`_extract_upstream_claims` decodes the id_token at token-exchange
       time and returns ``{id_token, email, cognito:username}``.
     * :meth:`load_access_token` re-attaches that on **every inbound request**.
