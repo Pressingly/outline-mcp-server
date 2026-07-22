@@ -37,9 +37,12 @@ identity forwarded downstream.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
+import httpx
 import jwt
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.providers.aws import AWSCognitoProvider
 from fastmcp.utilities.logging import get_logger
@@ -54,12 +57,87 @@ ID_TOKEN_KEY = "id_token"
 EMAIL_CLAIM = "email"
 COGNITO_USERNAME_CLAIM = "cognito:username"
 
+# Floor for a corrected `expires_in`, so a token that is already at (or past) its
+# `exp` still yields a positive lifetime instead of a negative one.
+MIN_EXPIRES_IN_SECONDS = 60
+
+
+def _true_expires_in(token_response: dict[str, Any]) -> int | None:
+    """Real remaining lifetime of the upstream access token, from its own ``exp``.
+
+    ``mpass-auth-proxy`` reports ``SESSION_COOKIE_MAX_AGE_SECONDS`` (7 days) as
+    ``expires_in`` because oauth2-proxy — the session authority for the browser
+    flow — trusts that value for its cookie lifetime. The Cognito access token
+    underneath still expires in one hour.
+
+    On the MCP path the session authority is FastMCP's ``OAuthProxy``, which keys
+    transparent refresh off ``expires_in``: it stores ``expires_at = now +
+    expires_in`` and only refreshes once that moment is reached. With the 7-day
+    value the stored expiry is a week out, so at the one-hour mark JWKS validation
+    of the real token fails while the refresh gate stays shut — the request 401s
+    and the MCP client is forced through a full interactive re-authorization.
+    Deriving the value from the token's own ``exp`` restores the invariant.
+
+    Returns ``None`` when the lifetime can't be determined, leaving the upstream
+    value untouched.
+    """
+    access_token = token_response.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    try:
+        # Unverified by design, as elsewhere in this module: the response comes
+        # from the provider's own server-to-server call, never from the client,
+        # and this only reads a lifetime hint — the token is still JWKS-verified
+        # on every request by the stock verifier.
+        exp = jwt.decode(access_token, options={"verify_signature": False}).get("exp")
+    except jwt.PyJWTError as exc:
+        logger.warning("Could not decode upstream access_token to read exp: %s", exc)
+        return None
+    if not isinstance(exp, (int, float)):
+        return None
+    return max(int(exp - time.time()), MIN_EXPIRES_IN_SECONDS)
+
+
+def _correct_expires_in(response: httpx.Response) -> httpx.Response:
+    """authlib compliance hook rewriting ``expires_in`` to the token's real value.
+
+    Registered for both the ``access_token_response`` and ``refresh_token_response``
+    hooks: correcting only the first would let the refresh path re-store the
+    inflated lifetime and wedge the session again an hour later.
+    """
+    if response.status_code != 200:
+        return response
+    try:
+        body = response.json()
+    except ValueError:
+        return response
+    if not isinstance(body, dict):
+        return response
+
+    corrected = _true_expires_in(body)
+    if corrected is None or body.get("expires_in") == corrected:
+        return response
+
+    logger.debug(
+        "Corrected upstream expires_in %s → %d (from access_token exp)",
+        body.get("expires_in"),
+        corrected,
+    )
+    body["expires_in"] = corrected
+    return httpx.Response(
+        status_code=response.status_code,
+        json=body,
+        request=response.request,
+    )
+
 
 class OutlineCognitoProvider(AWSCognitoProvider):
     """``AWSCognitoProvider`` that forwards the upstream id_token's identity.
 
-    Two overrides cooperate:
+    Three overrides cooperate:
 
+    * :meth:`_create_upstream_oauth_client` corrects the upstream ``expires_in``
+      so transparent refresh fires on time (see :func:`_true_expires_in`).
     * :meth:`_extract_upstream_claims` decodes the id_token at token-exchange
       time and returns ``{id_token, email, cognito:username}``.
     * :meth:`load_access_token` re-attaches that on **every inbound request**.
@@ -70,6 +148,19 @@ class OutlineCognitoProvider(AWSCognitoProvider):
       relay would fall back to the access token (no ``email``; opaque UUID ``sub``
       for federated users) and Outline would provision the wrong account.
     """
+
+    def _create_upstream_oauth_client(self) -> AsyncOAuth2Client:
+        """Attach the ``expires_in`` correction to every upstream token call.
+
+        This is ``OAuthProxy``'s single factory for the authlib client used by
+        both the authorization-code exchange and the refresh grant, so one
+        registration covers every path that stores an upstream token lifetime.
+        See :func:`_true_expires_in` for why the correction is needed.
+        """
+        client = super()._create_upstream_oauth_client()
+        client.register_compliance_hook("access_token_response", _correct_expires_in)
+        client.register_compliance_hook("refresh_token_response", _correct_expires_in)
+        return client
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         id_token = idp_tokens.get(ID_TOKEN_KEY)

@@ -22,6 +22,10 @@ dependencies = [
     # (outline_mcp/moneta/cognito.py). Present transitively via fastmcp; pinned
     # because we import it directly.
     "pyjwt>=2.0.0",
+    # Register the compliance hook that corrects the upstream `expires_in`
+    # (outline_mcp/moneta/cognito.py). Present transitively via fastmcp; pinned
+    # because we import it directly.
+    "authlib>=1.6.9",
     # Redis-backed, TLS-capable OAuth-state store for the Cognito provider
     # (outline_mcp/moneta/storage.py). Pin matches FastMCP's transitive
     # py-key-value-aio constraint.
