@@ -45,6 +45,7 @@ logger = logging.getLogger("fastmcp.outline_mcp.moneta")
 
 _DEFAULT_HTTP_PORT = 8213
 
+
 def enabled() -> bool:
     """True when the Cognito HTTP path should handle ``http`` mode."""
     on = bool(os.getenv("COGNITO_USER_POOL_ID", "").strip())
@@ -89,6 +90,33 @@ def _required_scopes() -> list[str]:
     return scopes or ["openid"]
 
 
+def _client_access_token_ttl() -> int:
+    """Lifetime (seconds) for the FastMCP-issued client access token.
+
+    Decoupled from the upstream Cognito token's ~1h lifetime. mpass-auth-proxy
+    reports an inflated 7-day ``expires_in`` that ``cognito._correct_expires_in``
+    rewrites down to the real ~1h so OAuthProxy transparently refreshes the
+    *upstream* token on time. Left at that value the *client* token would also be
+    hourly, forcing the MCP client through an hourly refresh grant (and exposing
+    it to FastMCP's per-exchange refresh-token rotation). Setting this longer keeps
+    the client token alive across the hourly upstream refresh, while server-side
+    reactive refresh keeps the upstream token fresh. Trade: a larger client-token
+    revocation window. Default 24h; override via ``MCP_ACCESS_TOKEN_TTL_SECONDS``.
+    """
+    raw = os.getenv("MCP_ACCESS_TOKEN_TTL_SECONDS", "").strip()
+    if not raw:
+        return 86400
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("MCP_ACCESS_TOKEN_TTL_SECONDS=%r is not an int; using default 86400", raw)
+        return 86400
+    if value <= 0:
+        logger.warning("MCP_ACCESS_TOKEN_TTL_SECONDS=%d must be positive; using default 86400", value)
+        return 86400
+    return value
+
+
 def get_cognito_http_mcp() -> FastMCP:
     """Build the FastMCP instance whose sole auth layer is the Cognito provider."""
     client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
@@ -110,6 +138,10 @@ def get_cognito_http_mcp() -> FastMCP:
         # None → FastMCP keeps its encrypted-file default (see moneta.storage).
         client_storage=build_oauth_storage(),
         jwt_signing_key=jwt_signing_key,
+        # Decouple the client token lifetime from the upstream ~1h so the client
+        # isn't forced through an hourly refresh grant (see _client_access_token_ttl
+        # and cognito._true_expires_in). Upstream stays fresh via reactive refresh.
+        fastmcp_access_token_expiry_seconds=_client_access_token_ttl(),
     )
 
     # AWSCognitoProvider fetches the authorization_endpoint from Cognito's OIDC

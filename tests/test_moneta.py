@@ -364,3 +364,19 @@ async def test_extract_upstream_claims_gates_the_access_token() -> None:
 
     resolve = await provider._extract_upstream_claims(idp_tokens, include_access_token=True)
     assert resolve[ACCESS_TOKEN_CLAIM] == "acc.tok.jwt"  # available at mint time
+
+
+# --- client access-token TTL (Issue 2 hardening) ---------------------------
+
+
+def test_client_access_token_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default 24h; positive int honored; junk/non-positive falls back to default."""
+    from outline_mcp.moneta.http import _client_access_token_ttl
+
+    monkeypatch.delenv("MCP_ACCESS_TOKEN_TTL_SECONDS", raising=False)
+    assert _client_access_token_ttl() == 86400
+    monkeypatch.setenv("MCP_ACCESS_TOKEN_TTL_SECONDS", "3600")
+    assert _client_access_token_ttl() == 3600
+    for bad in ("not-int", "0", "-5", ""):
+        monkeypatch.setenv("MCP_ACCESS_TOKEN_TTL_SECONDS", bad)
+        assert _client_access_token_ttl() == 86400
