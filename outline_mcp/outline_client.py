@@ -187,6 +187,18 @@ class OutlineClient:
             raise OutlineError("Client pool not initialized")
         return client
 
+    def _clear_isolated_jar(self) -> None:
+        """Empty the per-instance client's cookie jar before a retry attempt.
+
+        A dedicated per-instance client (the fwd: mint) authenticates by header
+        only and must NEVER send a cookie. Clearing any Set-Cookie (e.g. Outline's
+        accessToken on a 429) before each attempt stops a retry from replaying it,
+        flipping the transport to `cookie`, and tripping CSRF. No-op on the shared
+        pool. Race-free: an isolated client is used by a single request task.
+        """
+        if self._http_client is not None:
+            self._http_client.cookies.clear()
+
     @classmethod
     async def close_pool(cls):
         """
@@ -271,13 +283,7 @@ class OutlineClient:
         last_exception: Exception | None = None
 
         while attempt < max_retries:
-            # A dedicated per-instance client (the fwd: mint) authenticates by
-            # header only and must NEVER send a cookie. Clear any Set-Cookie
-            # (e.g. Outline's accessToken on a 429) before each attempt so a
-            # retry can't replay it, flip the transport to `cookie`, and trip
-            # CSRF. Race-free: the isolated client is used by a single mint task.
-            if self._http_client is not None:
-                self._http_client.cookies.clear()
+            self._clear_isolated_jar()
             try:
                 response = await client.post(url, headers=headers, json=data)
 
@@ -711,6 +717,7 @@ class OutlineClient:
         last_exception: Exception | None = None
 
         while attempt < max_retries:
+            self._clear_isolated_jar()
             try:
                 response = await client.post(
                     url,
@@ -800,6 +807,7 @@ class OutlineClient:
         last_exception: Exception | None = None
 
         while attempt < max_retries:
+            self._clear_isolated_jar()
             try:
                 response = await client.post(
                     url,
