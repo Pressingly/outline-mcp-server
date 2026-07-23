@@ -55,6 +55,7 @@ class OutlineClient:
         api_key: str | None = None,
         api_url: str | None = None,
         auth_headers: dict[str, str] | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ):
         """
         Initialize the Outline client.
@@ -62,6 +63,16 @@ class OutlineClient:
         Args:
             api_key: Outline API key or from OUTLINE_API_KEY env var.
             api_url: Outline API URL or from OUTLINE_API_URL env var.
+            auth_headers: When provided, replace the default ``Authorization:
+                Bearer`` header (e.g. proxy-injected identity on a trusted
+                internal network).
+            http_client: When provided, use this client for all requests instead
+                of the process-wide shared pool. Required for the ``fwd:`` mint
+                path, which must NOT share the pool's cookie jar: Outline issues
+                an ``accessToken`` cookie on a ForwardAuth response, and a shared
+                jar would replay it on later requests — flipping Outline's auth
+                transport to ``cookie`` and tripping CSRF protection. Passing a
+                fresh, caller-owned client keeps the mint cookie-isolated.
 
         Raises:
             OutlineError: If API key is missing.
@@ -89,6 +100,10 @@ class OutlineClient:
         # ``Authorization: Bearer <api_key>`` (e.g. proxy-injected identity like
         # ``X-Auth-Request-Email`` on a trusted internal network).
         self._auth_headers_override = dict(auth_headers) if auth_headers else None
+        # Optional per-instance client. When set, requests use it instead of the
+        # shared pool (see the ``http_client`` arg docstring for why the mint
+        # path needs its own cookie-isolated client).
+        self._http_client = http_client
 
         # Ensure API key is provided.
         # sanitized_key will be None or empty string if invalid
@@ -159,6 +174,30 @@ class OutlineClient:
         if self._auth_headers_override is not None:
             return dict(self._auth_headers_override)
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _request_client(self) -> httpx.AsyncClient:
+        """Return the httpx client for requests: the per-instance one if set,
+        else the shared pool.
+
+        Raises:
+            OutlineError: If neither a per-instance client nor the pool exists.
+        """
+        client = self._http_client or self._client_pool
+        if client is None:
+            raise OutlineError("Client pool not initialized")
+        return client
+
+    def _clear_isolated_jar(self) -> None:
+        """Empty the per-instance client's cookie jar before a retry attempt.
+
+        A dedicated per-instance client (the fwd: mint) authenticates by header
+        only and must NEVER send a cookie. Clearing any Set-Cookie (e.g. Outline's
+        accessToken on a 429) before each attempt stops a retry from replaying it,
+        flipping the transport to `cookie`, and tripping CSRF. No-op on the shared
+        pool. Race-free: an isolated client is used by a single request task.
+        """
+        if self._http_client is not None:
+            self._http_client.cookies.clear()
 
     @classmethod
     async def close_pool(cls):
@@ -237,16 +276,16 @@ class OutlineClient:
             "Accept": "application/json",
         }
 
-        if self._client_pool is None:
-            raise OutlineError("Client pool not initialized")
+        client = self._request_client()
 
         max_retries = 3
         attempt = 0
         last_exception: Exception | None = None
 
         while attempt < max_retries:
+            self._clear_isolated_jar()
             try:
-                response = await self._client_pool.post(url, headers=headers, json=data)
+                response = await client.post(url, headers=headers, json=data)
 
                 # Update rate limit state from response headers
                 self._update_rate_limits(response)
@@ -671,16 +710,16 @@ class OutlineClient:
             "Content-Type": "application/json",
         }
 
-        if self._client_pool is None:
-            raise OutlineError("Client pool not initialized")
+        client = self._request_client()
 
         max_retries = 3
         attempt = 0
         last_exception: Exception | None = None
 
         while attempt < max_retries:
+            self._clear_isolated_jar()
             try:
-                response = await self._client_pool.post(
+                response = await client.post(
                     url,
                     headers=headers,
                     json={"id": attachment_id},
@@ -761,16 +800,16 @@ class OutlineClient:
             "Content-Type": "application/json",
         }
 
-        if self._client_pool is None:
-            raise OutlineError("Client pool not initialized")
+        client = self._request_client()
 
         max_retries = 3
         attempt = 0
         last_exception: Exception | None = None
 
         while attempt < max_retries:
+            self._clear_isolated_jar()
             try:
-                response = await self._client_pool.post(
+                response = await client.post(
                     url,
                     headers=headers,
                     json={"id": attachment_id},

@@ -37,12 +37,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 from cryptography.fernet import Fernet
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from fastmcp.utilities.logging import get_logger
 
 from outline_mcp.client import OutlineClientError
-from outline_mcp.moneta.client import identity_email_for, stored_access_token
+from outline_mcp.moneta.client import identity_email_for, stored_access_token, upstream_access_token_for
 from outline_mcp.outline_client import OutlineClient, OutlineError
 
 logger = get_logger(__name__)
@@ -151,27 +152,77 @@ def _cache_set(identity: str, key: str) -> None:
 # --- mint (bootstrap via header-injection on the internal URL) -------------
 
 
-def _identity_client(email: str, internal_url: str) -> OutlineClient:
+def _isolated_http_client() -> httpx.AsyncClient:
+    """A fresh httpx client with its OWN empty cookie jar, for the mint only.
+
+    The mint MUST NOT use ``OutlineClient``'s process-wide shared pool. On the
+    ``fwd:`` path Outline issues an ``accessToken`` cookie (ForwardAuth session
+    JWT); a shared jar would store it and replay it on the next request. Outline's
+    ``parseAuthentication`` reads that cookie *before* the ``X-Auth-Request-Email``
+    header, so the transport becomes ``cookie`` — which (a) bypasses the intended
+    ``fwd:`` mint path and (b) trips CSRF protection (the MCP never holds a CSRF
+    cookie), yielding ``403 csrf_error``. A throwaway per-mint client keeps each
+    mint cookie-isolated. Mints are rare (once per user per cache lifetime), so
+    forgoing the connection pool here is cheap.
+    """
+    verify_ssl = os.getenv("OUTLINE_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
+    read_timeout = float(os.getenv("OUTLINE_TIMEOUT", "30.0"))
+    connect_timeout = float(os.getenv("OUTLINE_CONNECT_TIMEOUT", "5.0"))
+    write_timeout = float(os.getenv("OUTLINE_WRITE_TIMEOUT", "30.0"))
+    # follow_redirects=False: a mint is a single POST that never legitimately
+    # redirects. Following one could replay a just-set accessToken cookie within
+    # the request (the same CSRF-trip vector this isolation defends against).
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=connect_timeout, read=read_timeout, write=write_timeout, pool=5.0),
+        follow_redirects=False,
+        verify=verify_ssl,
+    )
+
+
+def _identity_client(
+    email: str,
+    internal_url: str,
+    http_client: httpx.AsyncClient,
+    access_token: str | None = None,
+) -> OutlineClient:
     """An OutlineClient that authenticates by injecting ``X-Auth-Request-Email``.
 
     Used only to bootstrap the key (``apiKeys.create``) on Outline's ``fwd:`` APP
-    path. No ``Authorization`` header — see the module docstring for why that matters.
+    path. No ``Authorization`` header — see the module docstring for why that
+    matters. ``http_client`` is a caller-owned, cookie-isolated client (see
+    :func:`_isolated_http_client`), never the shared pool.
+
+    When ``access_token`` is set, it is forwarded as ``X-Auth-Request-Access-Token``
+    — the header Outline's ``fwd:`` corporate-ID gate (``SMB_CORPORATE_ID``) reads
+    to verify ``custom:corporate_id``/``custom:is_corporate``, exactly as
+    oauth2-proxy forwards it on the browser path. Omitting it makes the mint 401
+    ("Access denied: missing access token") on corporate-gated deployments.
     """
-    return OutlineClient(api_url=internal_url, auth_headers={"X-Auth-Request-Email": email})
+    headers = {"X-Auth-Request-Email": email}
+    if access_token:
+        headers["X-Auth-Request-Access-Token"] = access_token
+    return OutlineClient(
+        api_url=internal_url,
+        auth_headers=headers,
+        http_client=http_client,
+    )
 
 
-async def _mint(email: str, internal_url: str) -> str | None:
+async def _mint(email: str, internal_url: str, access_token: str | None = None) -> str | None:
     """Mint a self-expiring ``ol_api_`` key for the SSO user via the ``fwd:`` APP path.
 
     Returns the raw key (``data.value``, populated only at create time), or ``None``
     on failure. The key carries ``expiresAt`` so it self-cleans — we never delete
-    keys (a revoke-on-mint would race concurrent/cross-pod mints).
+    keys (a revoke-on-mint would race concurrent/cross-pod mints). ``access_token``
+    is forwarded to clear Outline's corporate-ID gate (see :func:`_identity_client`).
     """
     expires_at = (datetime.now(timezone.utc) + timedelta(days=_KEY_TTL_DAYS)).isoformat()
     try:
-        resp = await _identity_client(email, internal_url).post(
-            "apiKeys.create", {"name": _KEY_NAME, "expiresAt": expires_at}
-        )
+        # A fresh cookie-isolated client per mint — see _isolated_http_client.
+        async with _isolated_http_client() as http_client:
+            resp = await _identity_client(email, internal_url, http_client, access_token).post(
+                "apiKeys.create", {"name": _KEY_NAME, "expiresAt": expires_at}
+            )
     except OutlineError as exc:
         logger.warning("api-key mint failed: %s", exc)
         return None
@@ -183,11 +234,14 @@ async def _mint(email: str, internal_url: str) -> str | None:
     return value
 
 
-async def _get_or_mint(identity: str, internal_url: str) -> str | None:
+async def _get_or_mint(identity: str, internal_url: str, access_token: str | None = None) -> str | None:
     """Return the cached ``ol_api_`` key for ``identity``, minting + caching if absent.
 
     A per-identity lock serializes the cache-miss path so parallel tool calls for
     the same user mint at most once (the rest cache-hit on the double-check).
+    ``access_token`` is used only on the mint (cache-miss) path — it is NOT part
+    of the cache key (the minted key belongs to the identity, and the access token
+    rotates hourly).
     """
     cached = _cache_get(identity)
     if cached:
@@ -197,7 +251,7 @@ async def _get_or_mint(identity: str, internal_url: str) -> str | None:
         cached = _cache_get(identity)  # double-check: another task may have minted
         if cached:
             return cached
-        key = await _mint(identity, internal_url)
+        key = await _mint(identity, internal_url, access_token)
         if key:
             _cache_set(identity, key)
             logger.debug("api-key: minted + cached for identity=%s", identity)
@@ -230,8 +284,20 @@ async def build_outline_client() -> OutlineClient | None:
             "to mint and use the per-user Outline API key."
         )
 
-    key = await _get_or_mint(identity, url)
+    # Forwarded as X-Auth-Request-Access-Token so the mint clears Outline's
+    # corporate-ID gate (SMB_CORPORATE_ID). Only consumed on a cache-miss mint.
+    access_token = upstream_access_token_for(stored.claims)
+    key = await _get_or_mint(identity, url, access_token)
     if not key:
+        # A corporate-gated Outline (SMB_CORPORATE_ID) rejects the mint when no
+        # access token is forwarded; surface that likely cause rather than a bare
+        # failure (the real reason is also in the mint's warning log).
+        if access_token is None:
+            raise OutlineClientError(
+                "Failed to mint an Outline API key for the SSO user: no upstream access "
+                "token was available to forward. If this Outline enforces SMB_CORPORATE_ID, "
+                "the mint cannot clear its corporate-ID gate without one."
+            )
         raise OutlineClientError("Failed to mint an Outline API key for the SSO user")
 
     logger.debug("build_outline_client: Cognito path — using minted key for identity=%s", identity)

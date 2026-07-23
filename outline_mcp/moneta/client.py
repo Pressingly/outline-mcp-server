@@ -24,6 +24,7 @@ from fastmcp.server.dependencies import get_access_token
 from fastmcp.utilities.logging import get_logger
 
 from outline_mcp.moneta.cognito import (
+    ACCESS_TOKEN_CLAIM,
     COGNITO_USERNAME_CLAIM,
     EMAIL_CLAIM,
     ID_TOKEN_KEY,
@@ -68,4 +69,27 @@ def identity_email_for(claims: dict[str, Any] | None) -> str | None:
     username = upstream.get(COGNITO_USERNAME_CLAIM)
     if isinstance(username, str) and username:
         return username
+    return None
+
+
+def upstream_access_token_for(claims: dict[str, Any] | None) -> str | None:
+    """Return the raw upstream Cognito access token from the request's claims.
+
+    ``None`` on the non-Cognito path, or when the upstream token response carries
+    no ``access_token`` (the resolve path re-reads it live from the stored token
+    set every request, so a pre-existing session is not starved). The mint
+    forwards this as ``X-Auth-Request-Access-Token``
+    so Outline's ``fwd:`` corporate-ID gate (``SMB_CORPORATE_ID``) accepts the
+    request — the same header oauth2-proxy sets on the browser path. Only present
+    on the per-request resolve path (see ``cognito._resolve_upstream_claims``),
+    never in the client-facing token.
+    """
+    if not claims:
+        return None
+    upstream = claims.get(UPSTREAM_CLAIMS_KEY)
+    if not isinstance(upstream, dict):
+        return None
+    access_token = upstream.get(ACCESS_TOKEN_CLAIM)
+    if isinstance(access_token, str) and access_token:
+        return access_token
     return None

@@ -53,6 +53,12 @@ UPSTREAM_CLAIMS_KEY = "upstream_claims"
 ID_TOKEN_KEY = "id_token"
 EMAIL_CLAIM = "email"
 COGNITO_USERNAME_CLAIM = "cognito:username"
+# The raw upstream Cognito access token. Added ONLY on the per-request resolve
+# path (never the exchange-time seal), so it reaches the mint via
+# get_access_token().claims without bloating the client-facing reference JWT.
+# Outline's fwd: corporate-ID gate (SMB_CORPORATE_ID) requires it forwarded as
+# X-Auth-Request-Access-Token — see outline_mcp.moneta.apitoken.
+ACCESS_TOKEN_CLAIM = "access_token"
 
 
 class OutlineCognitoProvider(AWSCognitoProvider):
@@ -71,7 +77,9 @@ class OutlineCognitoProvider(AWSCognitoProvider):
       for federated users) and Outline would provision the wrong account.
     """
 
-    async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
+    async def _extract_upstream_claims(
+        self, idp_tokens: dict[str, Any], *, include_access_token: bool = False
+    ) -> dict[str, Any] | None:
         id_token = idp_tokens.get(ID_TOKEN_KEY)
         if not isinstance(id_token, str) or not id_token:
             logger.warning(
@@ -95,6 +103,13 @@ class OutlineCognitoProvider(AWSCognitoProvider):
         cognito_username = claims.get(COGNITO_USERNAME_CLAIM)
         if isinstance(cognito_username, str) and cognito_username:
             extracted[COGNITO_USERNAME_CLAIM] = cognito_username
+        # Per-request resolve path only: carry the raw access token so the mint
+        # can forward it as X-Auth-Request-Access-Token past Outline's corporate
+        # gate. Omitted at exchange time to keep the client-facing token small.
+        if include_access_token:
+            access_token = idp_tokens.get(ACCESS_TOKEN_CLAIM)
+            if isinstance(access_token, str) and access_token:
+                extracted[ACCESS_TOKEN_CLAIM] = access_token
         logger.debug(
             "extract_upstream_claims: id_token_len=%d email=%s cognito:username=%s",
             len(id_token),
@@ -182,7 +197,7 @@ class OutlineCognitoProvider(AWSCognitoProvider):
                 upstream_id,
                 bool(raw.get("id_token")),
             )
-            return await self._extract_upstream_claims(raw)
+            return await self._extract_upstream_claims(raw, include_access_token=True)
         except Exception as exc:  # noqa: BLE001 — fail closed on any resolution error
             logger.warning("Cognito: failed to resolve upstream id_token: %s", exc)
             return None
