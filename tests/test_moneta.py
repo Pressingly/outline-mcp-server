@@ -364,3 +364,47 @@ async def test_extract_upstream_claims_gates_the_access_token() -> None:
 
     resolve = await provider._extract_upstream_claims(idp_tokens, include_access_token=True)
     assert resolve[ACCESS_TOKEN_CLAIM] == "acc.tok.jwt"  # available at mint time
+
+
+# --- client access-token TTL (Issue 2 hardening) ---------------------------
+
+
+def test_client_access_token_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default 24h; positive int honored; junk/non-positive falls back to default."""
+    from outline_mcp.moneta.http import _client_access_token_ttl
+
+    monkeypatch.delenv("MCP_ACCESS_TOKEN_TTL_SECONDS", raising=False)
+    assert _client_access_token_ttl() == 86400
+    monkeypatch.setenv("MCP_ACCESS_TOKEN_TTL_SECONDS", "3600")
+    assert _client_access_token_ttl() == 3600
+    for bad in ("not-int", "0", "-5", ""):
+        monkeypatch.setenv("MCP_ACCESS_TOKEN_TTL_SECONDS", bad)
+        assert _client_access_token_ttl() == 86400
+
+
+def test_get_cognito_http_mcp_passes_client_token_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the provider is constructed WITH the decoupled client-token TTL.
+
+    Guards the http.py wiring itself (not just the env parser) — reverting the
+    fastmcp_access_token_expiry_seconds kwarg would otherwise pass silently.
+    """
+    import outline_mcp.moneta.http as http
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_provider(**kwargs):
+        captured.update(kwargs)
+        raise _Stop  # stop before the rest of get_cognito_http_mcp runs
+
+    monkeypatch.setattr(http, "OutlineCognitoProvider", _fake_provider)
+    monkeypatch.setattr(http, "build_oauth_storage", lambda: None)  # avoid side effects
+    for key in ("COGNITO_USER_POOL_ID", "COGNITO_AWS_REGION", "OIDC_CLIENT_ID", "MCP_BASE_URL"):
+        monkeypatch.setenv(key, "x")
+    monkeypatch.setenv("MCP_ACCESS_TOKEN_TTL_SECONDS", "3600")
+
+    with pytest.raises(_Stop):
+        http.get_cognito_http_mcp()
+    assert captured.get("fastmcp_access_token_expiry_seconds") == 3600
