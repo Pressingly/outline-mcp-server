@@ -4,7 +4,6 @@ Collection management tools for the MCP Outline server.
 This module provides MCP tools for managing collections.
 """
 
-import os
 from typing import Any
 
 from mcp.types import ToolAnnotations
@@ -13,6 +12,7 @@ from outline_mcp.client import (
     OutlineClientError,
     get_outline_client,
 )
+from outline_mcp.env_flags import env_flag
 
 
 def _format_file_operation(file_operation: dict[str, Any] | None) -> str:
@@ -51,16 +51,8 @@ def register_tools(mcp) -> None:
         mcp: The FastMCP server instance
     """
     # Check environment variables for conditional registration
-    read_only = os.getenv("OUTLINE_READ_ONLY", "").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    disable_delete = os.getenv("OUTLINE_DISABLE_DELETE", "").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    read_only = env_flag("OUTLINE_READ_ONLY")
+    enable_delete = env_flag("OUTLINE_ENABLE_DELETE")
 
     # Export tools (always registered)
     @mcp.tool(
@@ -265,8 +257,8 @@ def register_tools(mcp) -> None:
             except Exception as e:
                 return f"Unexpected error: {str(e)}"
 
-    # Delete collection requires both read_only and disable_delete checks
-    if not read_only and not disable_delete:
+    # Delete collection requires write mode and the opt-in delete flag
+    if not read_only and enable_delete:
 
         @mcp.tool(
             annotations=ToolAnnotations(

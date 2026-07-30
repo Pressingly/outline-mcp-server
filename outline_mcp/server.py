@@ -20,17 +20,11 @@ from fastmcp import FastMCP
 
 from outline_mcp.tools import register_tools
 
-_INSTRUCTIONS = (
+INSTRUCTIONS = (
     "Manages documents, collections, and collaboration in Outline, "
     "a knowledge base and wiki.\n\n"
-    "Tool discovery: only a small default set of tools is available on startup. "
-    "If the current tools cannot fulfill a request:\n"
-    "1. Call list_available_tools to see all available tools with their parameters.\n"
-    "2. Call execute_tool(tool_name='...', arguments={...}) to use any tool "
-    "from the catalog.\n\n"
-    "The execute_tool proxy lets you call any available tool without additional "
-    "setup. You can also use enable_tools to activate tools directly if your "
-    "client supports dynamic tool registration.\n\n"
+    "Every available tool is listed up front — call them directly. There is no "
+    "discovery or enablement step.\n\n"
     "Getting started: use search_documents to find content, read_document to "
     "view a document, or list_collections to browse the wiki structure."
 )
@@ -38,7 +32,7 @@ _INSTRUCTIONS = (
 
 def get_stdio_mcp() -> FastMCP:
     """Stdio mode — credential from ``OUTLINE_API_KEY``."""
-    mcp = FastMCP("Outline MCP Server (stdio)", instructions=_INSTRUCTIONS)
+    mcp = FastMCP("Outline MCP Server (stdio)", instructions=INSTRUCTIONS)
     register_tools(mcp)
     return mcp
 
@@ -50,7 +44,7 @@ def get_http_mcp() -> FastMCP:
     ``x-outline-api-key`` header (resolved in :mod:`outline_mcp.client`). The
     moneta fork replaces this with a Cognito-backed provider.
     """
-    mcp = FastMCP("Outline MCP Server (http)", instructions=_INSTRUCTIONS)
+    mcp = FastMCP("Outline MCP Server (http)", instructions=INSTRUCTIONS)
     register_tools(mcp)
     return mcp
 
