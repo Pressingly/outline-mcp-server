@@ -5,8 +5,6 @@ This module provides MCP tools for archiving, trashing, and restoring
 documents.
 """
 
-import os
-
 from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
@@ -15,6 +13,7 @@ from outline_mcp.client import (
     get_resolved_api_key,
 )
 from outline_mcp.document_cache import get_document_cache
+from outline_mcp.env_flags import env_flag
 
 
 async def _evict_cached_copies(document_id: str) -> None:
@@ -33,11 +32,7 @@ def register_tools(mcp) -> None:
     Args:
         mcp: The FastMCP server instance
     """
-    disable_delete = os.getenv("OUTLINE_DISABLE_DELETE", "").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    enable_delete = env_flag("OUTLINE_ENABLE_DELETE")
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
@@ -119,7 +114,7 @@ def register_tools(mcp) -> None:
         except Exception as e:
             return f"Unexpected error: {str(e)}"
 
-    if not disable_delete:
+    if enable_delete:
 
         @mcp.tool(
             annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),

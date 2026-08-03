@@ -38,7 +38,7 @@ from starlette.routing import Mount, Route
 
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
 from outline_mcp.moneta.storage import build_oauth_storage
-from outline_mcp.server import get_http_mcp
+from outline_mcp.server import INSTRUCTIONS, get_http_mcp
 from outline_mcp.tools import register_tools
 
 logger = logging.getLogger("fastmcp.outline_mcp.moneta")
@@ -172,6 +172,7 @@ def get_cognito_http_mcp() -> FastMCP:
 
     mcp = FastMCP(
         "Outline MCP Server (Cognito http)",
+        instructions=INSTRUCTIONS,
         icons=[Icon(src="https://www.getoutline.com/favicon.ico", alt="Outline MCP Server")],
         website_url="https://www.getoutline.com",
         auth=provider,

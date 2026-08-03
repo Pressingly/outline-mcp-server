@@ -23,6 +23,8 @@ documents and collections, comments, attachments, and batch operations.
 | `OUTLINE_API_URL` | all | Outline API base URL, e.g. `https://app.getoutline.com/api`. |
 | `OUTLINE_READ_ONLY` | optional | `true` to register read-only tools only. |
 | `OUTLINE_DISABLE_AI_TOOLS` | optional | `true` to skip the AI `ask_ai_about_documents` tool. |
+| `OUTLINE_ENABLE_DELETE` | optional | Opt-in. Defaults to **false** — `delete_document`, `delete_collection` and `batch_delete_documents` are not registered unless this is `true`. |
+| `OUTLINE_ENABLE_BATCH_OPS` | optional | Opt-in. Defaults to **false** — the wide-blast-radius bulk writes `batch_archive_documents`, `batch_move_documents`, `batch_update_documents` and `batch_create_documents` are not registered unless this is `true`. `batch_delete_documents` is a delete and stays gated by `OUTLINE_ENABLE_DELETE`. |
 | `OUTLINE_VERIFY_SSL` | optional | `false` to skip TLS verification (self-signed certs). |
 | `MCP_HTTP_PORT` | http | Listener port (default `8213`). |
 | `MCP_ALLOWED_ORIGINS` | http | Comma-separated CORS allow-list (default `*`). |
