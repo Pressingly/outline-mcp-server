@@ -11,8 +11,8 @@ from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
     OutlineClientError,
+    cache_scope,
     get_outline_client,
-    get_resolved_api_key,
 )
 from outline_mcp.document_cache import get_document_cache
 
@@ -191,7 +191,7 @@ def register_tools(mcp) -> None:
                 return "Failed to update document."
 
             cache = get_document_cache()
-            await cache.invalidate_for_write(get_resolved_api_key(), document_id)
+            await cache.invalidate_for_write(cache_scope(), document_id)
 
             doc_title = document.get("title", "Untitled")
             return f"Document updated successfully: {doc_title}"

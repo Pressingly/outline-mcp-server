@@ -9,8 +9,8 @@ from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
     OutlineClientError,
+    cache_scope,
     get_outline_client,
-    get_resolved_api_key,
 )
 from outline_mcp.document_cache import get_document_cache
 from outline_mcp.env_flags import env_flag
@@ -22,7 +22,7 @@ async def _evict_cached_copies(document_id: str) -> None:
     later fails with a clear API error instead of being
     silently discarded."""
     cache = get_document_cache()
-    await cache.invalidate_for_write(get_resolved_api_key(), document_id)
+    await cache.invalidate_for_write(cache_scope(), document_id)
 
 
 def register_tools(mcp) -> None:
