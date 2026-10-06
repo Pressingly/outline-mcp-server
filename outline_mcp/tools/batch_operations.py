@@ -11,8 +11,8 @@ from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
     OutlineClientError,
+    cache_scope,
     get_outline_client,
-    get_resolved_api_key,
 )
 from outline_mcp.document_cache import get_document_cache
 from outline_mcp.env_flags import env_flag
@@ -382,7 +382,7 @@ def register_tools(mcp) -> None:
                             success = await client.permanently_delete_document(doc_id)
                             if success:
                                 cache = get_document_cache()
-                                await cache.invalidate_for_write(get_resolved_api_key(), doc_id)
+                                await cache.invalidate_for_write(cache_scope(), doc_id)
                                 results.append(
                                     _create_result_entry(
                                         doc_id,
@@ -410,7 +410,7 @@ def register_tools(mcp) -> None:
 
                             if response.get("success", False):
                                 cache = get_document_cache()
-                                await cache.invalidate_for_write(get_resolved_api_key(), doc_id)
+                                await cache.invalidate_for_write(cache_scope(), doc_id)
                                 results.append(_create_result_entry(doc_id, "success", title=doc_title))
                                 succeeded += 1
                             else:
@@ -516,7 +516,7 @@ def register_tools(mcp) -> None:
 
                         if document:
                             cache = get_document_cache()
-                            await cache.invalidate_for_write(get_resolved_api_key(), doc_id)
+                            await cache.invalidate_for_write(cache_scope(), doc_id)
                             results.append(
                                 _create_result_entry(
                                     doc_id,

@@ -12,6 +12,8 @@ Hooks into upstream (kept intentionally tiny):
 * ``outline_mcp.client`` — :func:`outline_mcp.client.get_outline_client` tries
   :func:`outline_mcp.moneta.apitoken.build_outline_client` first (mint + cache a
   per-user Outline API key from the relayed Cognito identity).
+* ``outline_mcp.client`` — :func:`outline_mcp.client.cache_scope` scopes the
+  document cache by :func:`outline_mcp.moneta.client.request_identity` first.
 
 Everything else (the Cognito provider, OAuth-state storage, the Cognito HTTP
 app, the API-key minting bridge) is defined here. Some helpers are duplicated

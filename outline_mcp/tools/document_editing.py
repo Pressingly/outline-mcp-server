@@ -10,8 +10,8 @@ from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
     OutlineClientError,
+    cache_scope,
     get_outline_client,
-    get_resolved_api_key,
 )
 from outline_mcp.document_cache import get_document_cache
 from outline_mcp.models import (
@@ -120,7 +120,7 @@ def register_tools(mcp) -> None:
 
             new_text = _apply_edits(doc.text, edits)
 
-            api_key = get_resolved_api_key()
+            scope = cache_scope()
             cache = get_document_cache()
             n = len(edits)
 
@@ -136,9 +136,9 @@ def register_tools(mcp) -> None:
                 result_doc = response.get("data", {})
                 saved_text = result_doc.get("text", new_text)
                 saved_title = result_doc.get("title", doc.title)
-                await cache.invalidate_for_write(api_key, document_id)
+                await cache.invalidate_for_write(scope, document_id)
                 await cache.put(
-                    api_key,
+                    scope,
                     document_id,
                     {
                         "title": saved_title,
@@ -149,7 +149,7 @@ def register_tools(mcp) -> None:
                 return f"Applied {n} edit(s) to '{doc.title}'. Saved to Outline."
             else:
                 await cache.stage_text(
-                    api_key,
+                    scope,
                     document_id,
                     doc,
                     new_text,

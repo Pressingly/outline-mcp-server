@@ -72,6 +72,19 @@ def identity_email_for(claims: dict[str, Any] | None) -> str | None:
     return None
 
 
+def request_identity() -> str | None:
+    """SSO identity of the in-flight request, or ``None`` off the Cognito path.
+
+    The same identity :func:`outline_mcp.moneta.apitoken.build_outline_client`
+    mints the request's Outline key for, so anything scoped by it follows the
+    credential Outline actually authorises.
+    """
+    stored = stored_access_token()
+    if stored is None:
+        return None
+    return identity_email_for(stored.claims)
+
+
 def upstream_access_token_for(claims: dict[str, Any] | None) -> str | None:
     """Return the raw upstream Cognito access token from the request's claims.
 
