@@ -17,6 +17,7 @@ The fork replaces :func:`get_outline_client` to mint and cache a per-user
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 from outline_mcp.outline_client import OutlineClient, OutlineError, _sanitize_value
@@ -51,6 +52,29 @@ def get_resolved_api_key() -> str:
     Returns an empty string when neither is set.
     """
     return _get_header_api_key() or os.getenv("OUTLINE_API_KEY", "")
+
+
+def _digest(kind: str, value: str) -> str:
+    return f"{kind}:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def cache_scope() -> str | None:
+    """Return the document-cache scope for the current request, or ``None``.
+
+    Mirrors :func:`get_outline_client` so cached content is only ever served to
+    the credential that fetched it: the SSO identity on the Cognito path, else
+    the resolved API key. Both are hashed so no secret or email becomes a dict
+    key. ``None`` means no identity: callers must bypass the cache entirely.
+    """
+    from outline_mcp.moneta.client import request_identity
+
+    identity = request_identity()
+    if identity:
+        return _digest("sso", identity)
+    api_key = get_resolved_api_key()
+    if api_key:
+        return _digest("key", api_key)
+    return None
 
 
 async def get_outline_client() -> OutlineClient:

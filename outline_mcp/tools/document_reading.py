@@ -12,8 +12,8 @@ from mcp.types import ToolAnnotations
 
 from outline_mcp.client import (
     OutlineClientError,
+    cache_scope,
     get_outline_client,
-    get_resolved_api_key,
 )
 from outline_mcp.document_cache import (
     CachedDocument,
@@ -79,14 +79,14 @@ async def get_cached_or_fetch(
     Raises:
         OutlineClientError: If API call fails.
     """
-    api_key = get_resolved_api_key()
+    scope = cache_scope()
     cache = get_document_cache()
-    doc = await cache.get(api_key, document_id)
+    doc = await cache.get(scope, document_id)
     if doc is not None:
         return doc
     client = await get_outline_client()
     data = await client.get_document(document_id)
-    return await cache.put(api_key, document_id, data)
+    return await cache.put(scope, document_id, data)
 
 
 def register_tools(mcp) -> None:

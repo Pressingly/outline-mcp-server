@@ -2,6 +2,11 @@
 
 Caches Outline document content to reduce API calls and support
 staged edits. Thread-safe via asyncio.Lock.
+
+Entries are keyed by ``(scope, document_id)``, where ``scope`` identifies the
+credential that fetched the document (see ``outline_mcp.client.cache_scope``).
+A ``None`` scope means the request has no identity: nothing is read from or
+written to the store, so content is never shared under an anonymous key.
 """
 
 import asyncio
@@ -40,10 +45,12 @@ class DocumentCache:
         self._store: OrderedDict[tuple[str, str], CachedDocument] = OrderedDict()
         self._lock = asyncio.Lock()
 
-    async def get(self, api_key: str, document_id: str) -> CachedDocument | None:
+    async def get(self, scope: str | None, document_id: str) -> CachedDocument | None:
         """Return cached doc if present and not expired."""
+        if scope is None:
+            return None
         async with self._lock:
-            key = (api_key, document_id)
+            key = (scope, document_id)
             doc = self._store.get(key)
             if doc is None:
                 return None
@@ -55,7 +62,7 @@ class DocumentCache:
 
     async def put(
         self,
-        api_key: str,
+        scope: str | None,
         document_id: str,
         data: dict[str, Any],
     ) -> CachedDocument:
@@ -65,20 +72,18 @@ class DocumentCache:
         returned unchanged — a racing API fetch must not
         destroy staged edits. Use ``evict`` first when the
         overwrite is intentional (e.g. after a save).
+        With a ``None`` scope the document is returned
+        without being stored.
         """
+        doc = _document_from(data)
+        if scope is None:
+            return doc
         async with self._lock:
-            key = (api_key, document_id)
+            key = (scope, document_id)
             existing = self._store.get(key)
             if existing is not None and existing.dirty:
                 self._store.move_to_end(key)
                 return existing
-            doc = CachedDocument(
-                title=data.get("title", "Untitled"),
-                text=data.get("text", ""),
-                url=data.get("url", ""),
-                cached_at=time.monotonic(),
-                dirty=False,
-            )
             self._store[key] = doc
             self._store.move_to_end(key)
             self._evict_if_needed()
@@ -86,7 +91,7 @@ class DocumentCache:
 
     async def stage_text(
         self,
-        api_key: str,
+        scope: str | None,
         document_id: str,
         base: CachedDocument,
         text: str,
@@ -96,9 +101,15 @@ class DocumentCache:
         Never silently no-ops: if the entry vanished (e.g.
         evicted by a concurrent save), it is recreated from
         ``base``.
+
+        Raises:
+            ValueError: If ``scope`` is ``None`` — staged
+                edits must belong to a request identity.
         """
+        if scope is None:
+            raise ValueError("Cannot stage edits without a request identity; use save=True.")
         async with self._lock:
-            key = (api_key, document_id)
+            key = (scope, document_id)
             self._store[key] = CachedDocument(
                 title=base.title,
                 text=text,
@@ -109,15 +120,16 @@ class DocumentCache:
             self._store.move_to_end(key)
             self._evict_if_needed()
 
-    async def evict(self, api_key: str, document_id: str) -> None:
+    async def evict(self, scope: str | None, document_id: str) -> None:
         """Remove a specific cache entry."""
+        if scope is None:
+            return
         async with self._lock:
-            key = (api_key, document_id)
-            self._store.pop(key, None)
+            self._store.pop((scope, document_id), None)
 
     async def evict_document(self, document_id: str) -> None:
         """Remove clean cache entries for a document ID,
-        regardless of API key.
+        regardless of scope.
 
         Dirty (staged) entries are preserved so one user's
         save never silently destroys another user's staged
@@ -127,13 +139,14 @@ class DocumentCache:
         async with self._lock:
             self._evict_clean_locked(document_id)
 
-    async def invalidate_for_write(self, api_key: str, document_id: str) -> None:
+    async def invalidate_for_write(self, scope: str | None, document_id: str) -> None:
         """Invalidate after a successful write: drop the
         writer's own entry (staged or not — it is superseded
         by the write) and all clean copies of the document.
         Other users' staged edits are preserved."""
         async with self._lock:
-            self._store.pop((api_key, document_id), None)
+            if scope is not None:
+                self._store.pop((scope, document_id), None)
             self._evict_clean_locked(document_id)
 
     def _evict_clean_locked(self, document_id: str) -> None:
@@ -168,6 +181,16 @@ class DocumentCache:
                     break
             if not evicted:
                 break
+
+
+def _document_from(data: dict[str, Any]) -> CachedDocument:
+    return CachedDocument(
+        title=data.get("title", "Untitled"),
+        text=data.get("text", ""),
+        url=data.get("url", ""),
+        cached_at=time.monotonic(),
+        dirty=False,
+    )
 
 
 _cache: DocumentCache | None = None
