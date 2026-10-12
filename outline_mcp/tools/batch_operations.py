@@ -15,6 +15,7 @@ from outline_mcp.client import (
     get_outline_client,
 )
 from outline_mcp.document_cache import get_document_cache
+from outline_mcp.document_links import document_link
 from outline_mcp.env_flags import env_flag
 from outline_mcp.models import (
     BatchCreateItem,
@@ -27,6 +28,7 @@ def _create_result_entry(
     status: str,
     title: str | None = None,
     error: str | None = None,
+    url: str | None = None,
 ) -> dict[str, Any]:
     """
     Create a standardized result entry for batch operations.
@@ -36,6 +38,7 @@ def _create_result_entry(
         status: Status of the operation ('success' or 'failed')
         title: Optional document title (for successful operations)
         error: Optional error message (for failed operations)
+        url: Optional document URL (for successful operations)
 
     Returns:
         Dictionary containing result information
@@ -48,7 +51,27 @@ def _create_result_entry(
     if error:
         result["error"] = error
 
+    if url:
+        result["url"] = url
+
     return result
+
+
+def _link_suffix(result: dict[str, Any]) -> str:
+    link = document_link(result.get("url", ""))
+    return f" ({link})" if link else ""
+
+
+def _succeeded(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in results if r["status"] == "success"]
+
+
+def _document_ids_section(heading: str, results: list[dict[str, Any]]) -> str:
+    entries = _succeeded(results)
+    if not entries:
+        return ""
+    items = "".join(f"  - {entry['id']}{_link_suffix(entry)}\n" for entry in entries)
+    return f"\n\n{heading}:\n{items}"
 
 
 def _format_batch_results(
@@ -103,7 +126,7 @@ def _format_batch_results(
             for result in successes:
                 title = result.get("title", "Untitled")
                 doc_id = result["id"]
-                lines.append(f"  ✓ {doc_id} - {title}")
+                lines.append(f"  ✓ {doc_id} - {title}{_link_suffix(result)}")
 
         # Show failed operations with error details
         if failures:
@@ -522,6 +545,7 @@ def register_tools(mcp) -> None:
                                     doc_id,
                                     "success",
                                     title=document.get("title", "Untitled"),
+                                    url=document.get("url"),
                                 )
                             )
                             succeeded += 1
@@ -548,7 +572,8 @@ def register_tools(mcp) -> None:
                         )
                         failed += 1
 
-                return _format_batch_results("update", len(updates), succeeded, failed, results)
+                summary = _format_batch_results("update", len(updates), succeeded, failed, results)
+                return summary + _document_ids_section("Updated documents", results)
 
             except OutlineClientError as e:
                 return f"Error initializing client: {str(e)}"
@@ -602,7 +627,6 @@ def register_tools(mcp) -> None:
             results: list[dict[str, Any]] = []
             succeeded = 0
             failed = 0
-            created_ids: list[str] = []
 
             try:
                 client = await get_outline_client()
@@ -626,8 +650,14 @@ def register_tools(mcp) -> None:
                         if document:
                             doc_id = document.get("id", "unknown")
                             doc_title = document.get("title", "Untitled")
-                            created_ids.append(doc_id)
-                            results.append(_create_result_entry(doc_id, "success", title=doc_title))
+                            results.append(
+                                _create_result_entry(
+                                    doc_id,
+                                    "success",
+                                    title=doc_title,
+                                    url=document.get("url"),
+                                )
+                            )
                             succeeded += 1
                         else:
                             results.append(
@@ -652,16 +682,8 @@ def register_tools(mcp) -> None:
                         )
                         failed += 1
 
-                # Format results with created IDs
-                result_text = _format_batch_results("create", len(documents), succeeded, failed, results)
-
-                # Add created IDs section if any succeeded
-                if created_ids:
-                    result_text += "\n\nCreated Document IDs:\n"
-                    for doc_id in created_ids:
-                        result_text += f"  - {doc_id}\n"
-
-                return result_text
+                summary = _format_batch_results("create", len(documents), succeeded, failed, results)
+                return summary + _document_ids_section("Created Document IDs", results)
 
             except OutlineClientError as e:
                 return f"Error initializing client: {str(e)}"

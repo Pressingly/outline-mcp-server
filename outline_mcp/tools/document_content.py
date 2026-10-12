@@ -15,6 +15,7 @@ from outline_mcp.client import (
     get_outline_client,
 )
 from outline_mcp.document_cache import get_document_cache
+from outline_mcp.document_links import with_document_link
 
 
 def register_tools(mcp) -> None:
@@ -74,7 +75,8 @@ def register_tools(mcp) -> None:
                 no icon is set.
 
         Returns:
-            Result message with the new document ID
+            Result message with the new document ID and its
+            URL
         """
         try:
             client = await get_outline_client()
@@ -104,7 +106,10 @@ def register_tools(mcp) -> None:
             doc_id = document.get("id", "unknown")
             doc_title = document.get("title", "Untitled")
 
-            return f"Document created successfully: {doc_title} (ID: {doc_id})"
+            return with_document_link(
+                f"Document created successfully: {doc_title} (ID: {doc_id})",
+                document.get("url", ""),
+            )
         except OutlineClientError as e:
             return f"Error creating document: {str(e)}"
         except Exception as e:
@@ -194,7 +199,10 @@ def register_tools(mcp) -> None:
             await cache.invalidate_for_write(cache_scope(), document_id)
 
             doc_title = document.get("title", "Untitled")
-            return f"Document updated successfully: {doc_title}"
+            return with_document_link(
+                f"Document updated successfully: {doc_title}",
+                document.get("url", ""),
+            )
         except OutlineClientError as e:
             return f"Error updating document: {str(e)}"
         except Exception as e:
