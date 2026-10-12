@@ -14,6 +14,7 @@ from outline_mcp.client import (
     get_outline_client,
 )
 from outline_mcp.document_cache import get_document_cache
+from outline_mcp.document_links import with_document_link
 from outline_mcp.models import (
     DocumentEdit,
 )
@@ -146,7 +147,10 @@ def register_tools(mcp) -> None:
                         "url": doc.url,
                     },
                 )
-                return f"Applied {n} edit(s) to '{doc.title}'. Saved to Outline."
+                return with_document_link(
+                    f"Applied {n} edit(s) to '{doc.title}'. Saved to Outline.",
+                    result_doc.get("url") or doc.url,
+                )
             else:
                 await cache.stage_text(
                     scope,
