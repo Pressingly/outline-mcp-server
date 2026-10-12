@@ -12,6 +12,22 @@ from outline_mcp.client import (
     OutlineClientError,
     get_outline_client,
 )
+from outline_mcp.document_links import document_link, with_document_link
+
+
+def _link_for(document: dict[str, Any]) -> str:
+    return document_link(document.get("url") or "")
+
+
+def _url_line(document: dict[str, Any]) -> str:
+    link = _link_for(document)
+    return f"URL: {link}\n" if link else ""
+
+
+def _title_match(document: dict[str, Any], label: str) -> str:
+    doc_id = document.get("id", "unknown")
+    title = document.get("title", "Untitled")
+    return with_document_link(f"{label}{doc_id} (Title: {title})", document.get("url") or "")
 
 
 def _format_search_results(
@@ -47,6 +63,7 @@ def _format_search_results(
 
         output += f"## {i}. {title}\n"
         output += f"ID: {doc_id}\n"
+        output += _url_line(document)
         # Show ranking if present (including 0.0)
         if "ranking" in result:
             ranking = result["ranking"]
@@ -72,6 +89,7 @@ def _format_documents_list(documents: list[dict[str, Any]], title: str) -> str:
 
         output += f"## {i}. {doc_title}\n"
         output += f"ID: {doc_id}\n"
+        output += _url_line(document)
         if updated_at:
             output += f"Last Updated: {updated_at}\n"
         output += "\n"
@@ -113,7 +131,9 @@ def _format_collection_documents(doc_nodes: list[dict[str, Any]]) -> str:
 
         # Format this node
         indent = "  " * depth
-        text = f"{indent}- {title} (ID: {node_id})\n"
+        link = _link_for(node)
+        link_part = f", URL: {link}" if link else ""
+        text = f"{indent}- {title} (ID: {node_id}{link_part})\n"
 
         # Recursively format children
         for child in children:
@@ -326,16 +346,10 @@ def register_tools(mcp) -> None:
             exact_matches = [r for r in results if (r.get("document", {}).get("title", "").lower() == query.lower())]
 
             if exact_matches:
-                doc = exact_matches[0].get("document", {})
-                doc_id = doc.get("id", "unknown")
-                title = doc.get("title", "Untitled")
-                return f"Document ID: {doc_id} (Title: {title})"
+                return _title_match(exact_matches[0].get("document", {}), "Document ID: ")
 
             # Otherwise return the top match
-            doc = results[0].get("document", {})
-            doc_id = doc.get("id", "unknown")
-            title = doc.get("title", "Untitled")
-            return f"Best match - Document ID: {doc_id} (Title: {title})"
+            return _title_match(results[0].get("document", {}), "Best match - Document ID: ")
         except OutlineClientError as e:
             return f"Error searching for document: {str(e)}"
         except Exception as e:

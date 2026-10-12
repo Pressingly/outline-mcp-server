@@ -19,6 +19,7 @@ from outline_mcp.document_cache import (
     CachedDocument,
     get_document_cache,
 )
+from outline_mcp.document_links import document_link
 
 
 def format_lines_with_numbers(lines: list[str], start: int) -> str:
@@ -156,7 +157,7 @@ def register_tools(mcp) -> None:
 
             output += staged_changes_notice(doc)
             if doc.url:
-                output += f"\n\nURL: {doc.url}"
+                output += f"\n\nURL: {document_link(doc.url)}"
             return output
         except OutlineClientError as e:
             return f"Error reading document: {str(e)}"
