@@ -2,14 +2,17 @@
 
 Outline returns a document's ``url`` as a path (``/doc/<slug>-<urlId>``). The
 public host is derived from ``OUTLINE_API_URL``; when it is not configured the
-path is returned unchanged, so a link never points at a guessed host or at the
-internal API URL.
+path is returned unchanged, so a link never points at a guessed host. A base on
+the same host as ``OUTLINE_INTERNAL_BASE_URL`` is treated as unconfigured, so the
+internal URL never leaks into a link.
 """
 
 from __future__ import annotations
 
 import os
 from urllib.parse import urlparse
+
+from outline_mcp.outline_client import _sanitize_value
 
 _API_SUFFIX = "/api"
 
@@ -19,13 +22,25 @@ def _is_web_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _env_value(raw: str | None) -> str:
+    return _sanitize_value(raw) or ""
+
+
+def _host(url: str) -> str:
+    return urlparse(url).netloc.lower()
+
+
+def _is_internal_host(base: str, internal_base: str) -> bool:
+    return bool(base) and _is_web_url(internal_base) and _host(base) == _host(internal_base)
+
+
 def _is_absolute(path_or_url: str) -> bool:
     return bool(urlparse(path_or_url).netloc)
 
 
 def public_base_url(api_url: str) -> str:
     """Return the public Outline base for an API URL, or "" if it is not a web URL."""
-    base = api_url.strip().rstrip("/")
+    base = _env_value(api_url).rstrip("/")
     if base.lower().endswith(_API_SUFFIX):
         base = base[: -len(_API_SUFFIX)].rstrip("/")
     return base if _is_web_url(base) else ""
@@ -39,8 +54,10 @@ def public_document_url(path_or_url: str, base: str) -> str:
 
 
 def configured_public_base() -> str:
-    """Return the public Outline base derived from ``OUTLINE_API_URL``."""
-    return public_base_url(os.getenv("OUTLINE_API_URL", ""))
+    """Return the public Outline base from ``OUTLINE_API_URL``, or "" if it is the internal host."""
+    base = public_base_url(os.getenv("OUTLINE_API_URL", ""))
+    internal_base = _env_value(os.getenv("OUTLINE_INTERNAL_BASE_URL"))
+    return "" if _is_internal_host(base, internal_base) else base
 
 
 def document_link(path_or_url: str) -> str:

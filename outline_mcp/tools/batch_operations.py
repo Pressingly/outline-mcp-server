@@ -62,6 +62,18 @@ def _link_suffix(result: dict[str, Any]) -> str:
     return f" ({link})" if link else ""
 
 
+def _succeeded(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in results if r["status"] == "success"]
+
+
+def _document_ids_section(heading: str, results: list[dict[str, Any]]) -> str:
+    entries = _succeeded(results)
+    if not entries:
+        return ""
+    items = "".join(f"  - {entry['id']}{_link_suffix(entry)}\n" for entry in entries)
+    return f"\n\n{heading}:\n{items}"
+
+
 def _format_batch_results(
     operation: str,
     total: int,
@@ -560,7 +572,8 @@ def register_tools(mcp) -> None:
                         )
                         failed += 1
 
-                return _format_batch_results("update", len(updates), succeeded, failed, results)
+                summary = _format_batch_results("update", len(updates), succeeded, failed, results)
+                return summary + _document_ids_section("Updated documents", results)
 
             except OutlineClientError as e:
                 return f"Error initializing client: {str(e)}"
@@ -669,16 +682,8 @@ def register_tools(mcp) -> None:
                         )
                         failed += 1
 
-                # Format results with created IDs
-                result_text = _format_batch_results("create", len(documents), succeeded, failed, results)
-
-                created = [r for r in results if r["status"] == "success"]
-                if created:
-                    result_text += "\n\nCreated Document IDs:\n"
-                    for entry in created:
-                        result_text += f"  - {entry['id']}{_link_suffix(entry)}\n"
-
-                return result_text
+                summary = _format_batch_results("create", len(documents), succeeded, failed, results)
+                return summary + _document_ids_section("Created Document IDs", results)
 
             except OutlineClientError as e:
                 return f"Error initializing client: {str(e)}"
