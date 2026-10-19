@@ -33,6 +33,7 @@ from fastmcp.tools import Tool
 from fastmcp.utilities.logging import get_logger
 
 from outline_mcp.env_flags import env_flag
+from outline_mcp.moneta.tool_annotations import install_tool_annotations
 from outline_mcp.tools import (
     ai_tools,
     batch_operations,
@@ -85,6 +86,7 @@ def register_tools(mcp: FastMCP) -> None:
 
     for mod in modules:
         mod.register_tools(mcp)
+    install_tool_annotations(mcp)
 
     count = sum(1 for c in mcp.local_provider._components.values() if isinstance(c, Tool))
     logger.info(
