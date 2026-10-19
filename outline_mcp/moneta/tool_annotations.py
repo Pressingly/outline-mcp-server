@@ -28,8 +28,6 @@ class Access(Enum):
 
 TOOL_ACCESS: Mapping[str, Access] = {
     "ask_ai_about_documents": Access.READ,
-    "export_all_collections": Access.READ,
-    "export_collection": Access.READ,
     "export_document": Access.READ,
     "fetch_attachment": Access.READ,
     "get_attachment_url": Access.READ,
@@ -48,6 +46,8 @@ TOOL_ACCESS: Mapping[str, Access] = {
     "search_document_content": Access.READ,
     "search_documents": Access.READ,
     "add_comment": Access.ADD,
+    "export_all_collections": Access.ADD,
+    "export_collection": Access.ADD,
     "create_collection": Access.ADD,
     "create_document": Access.ADD,
     "batch_create_documents": Access.ADD,

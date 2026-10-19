@@ -12,8 +12,6 @@ from outline_mcp.tools import register_tools
 
 READ_ONLY = {
     "ask_ai_about_documents",
-    "export_all_collections",
-    "export_collection",
     "export_document",
     "fetch_attachment",
     "get_attachment_url",
@@ -32,7 +30,14 @@ READ_ONLY = {
     "search_document_content",
     "search_documents",
 }
-ADD_ONLY = {"add_comment", "create_collection", "create_document", "batch_create_documents"}
+ADD_ONLY = {
+    "add_comment",
+    "create_collection",
+    "create_document",
+    "batch_create_documents",
+    "export_all_collections",
+    "export_collection",
+}
 DESTRUCTIVE = {
     "archive_document",
     "batch_archive_documents",
