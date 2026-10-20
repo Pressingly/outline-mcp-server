@@ -23,6 +23,7 @@ from mcp.types import ToolAnnotations
 class Access(Enum):
     READ = "read"
     ADD = "add"
+    START_JOB = "start_job"
     WRITE = "write"
 
 
@@ -46,8 +47,8 @@ TOOL_ACCESS: Mapping[str, Access] = {
     "search_document_content": Access.READ,
     "search_documents": Access.READ,
     "add_comment": Access.ADD,
-    "export_all_collections": Access.ADD,
-    "export_collection": Access.ADD,
+    "export_all_collections": Access.START_JOB,
+    "export_collection": Access.START_JOB,
     "create_collection": Access.ADD,
     "create_document": Access.ADD,
     "batch_create_documents": Access.ADD,
@@ -72,10 +73,11 @@ def access_for(tool_name: str) -> Access:
 
 
 def hints_for(access: Access) -> dict[str, bool]:
-    return {
+    hints = {
         "readOnlyHint": access is Access.READ,
         "destructiveHint": access is Access.WRITE,
     }
+    return {**hints, "idempotentHint": False} if access is Access.START_JOB else hints
 
 
 def annotated(tool: Tool) -> Tool:

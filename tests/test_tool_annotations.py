@@ -30,14 +30,13 @@ READ_ONLY = {
     "search_document_content",
     "search_documents",
 }
+EXPORT_JOBS = {"export_all_collections", "export_collection"}
 ADD_ONLY = {
     "add_comment",
     "create_collection",
     "create_document",
     "batch_create_documents",
-    "export_all_collections",
-    "export_collection",
-}
+} | EXPORT_JOBS
 DESTRUCTIVE = {
     "archive_document",
     "batch_archive_documents",
@@ -112,20 +111,46 @@ async def test_unclassified_tool_is_published_as_destructive_write():
     assert annotations.destructiveHint is True
 
 
-async def test_hints_replace_conflicting_decorator_values(all_tools_enabled):
-    mcp = FastMCP("scratch")
+async def test_collection_exports_are_not_advertised_as_idempotent(all_tools_enabled):
+    listed = await _listed(get_stdio_mcp())
+    for name in EXPORT_JOBS:
+        assert listed[name].idempotentHint is False, name
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-    def delete_document() -> str:
+
+@pytest.mark.parametrize(
+    ("tool_name", "decorator_hints", "expected"),
+    [
+        (
+            "delete_document",
+            ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False),
+            (False, True),
+        ),
+        (
+            "list_collections",
+            ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+            (True, False),
+        ),
+    ],
+)
+async def test_hints_replace_conflicting_decorator_values(all_tools_enabled, tool_name, decorator_hints, expected):
+    mcp = FastMCP("scratch")
+    register_tools(mcp)
+
+    @mcp.tool(name=tool_name, annotations=decorator_hints)
+    def stub() -> str:
         return "x"
 
-    register_tools(mcp)
-    annotations = (await _listed(mcp))["delete_document"]
-    assert (annotations.readOnlyHint, annotations.destructiveHint) == (False, True)
-    assert annotations.idempotentHint is True
+    annotations = (await _listed(mcp))[tool_name]
+    assert (annotations.readOnlyHint, annotations.destructiveHint) == expected
+    assert annotations.idempotentHint is False
 
 
 def test_hints_for_each_access_level():
     assert hints_for(Access.READ) == {"readOnlyHint": True, "destructiveHint": False}
     assert hints_for(Access.ADD) == {"readOnlyHint": False, "destructiveHint": False}
     assert hints_for(Access.WRITE) == {"readOnlyHint": False, "destructiveHint": True}
+    assert hints_for(Access.START_JOB) == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+    }
