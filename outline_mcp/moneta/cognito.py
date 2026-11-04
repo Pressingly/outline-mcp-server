@@ -44,8 +44,13 @@ import httpx
 import jwt
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.auth.oauth_proxy.models import UpstreamTokenSet
 from fastmcp.server.auth.providers.aws import AWSCognitoProvider
 from fastmcp.utilities.logging import get_logger
+from mcp.server.auth.provider import RefreshToken
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+from outline_mcp.moneta.session_log import describe_failure, describe_session
 
 logger = get_logger(__name__)
 
@@ -178,6 +183,11 @@ class OutlineCognitoProvider(AWSCognitoProvider):
       they never reach ``get_access_token().claims``. Without this override the
       relay would fall back to the access token (no ``email``; opaque UUID ``sub``
       for federated users) and Outline would provision the wrong account.
+
+    The refresh paths (:meth:`_try_transparent_refresh`, :meth:`exchange_refresh_token`)
+    and a rejected live session in :meth:`load_access_token` are wrapped only to log the
+    failure at WARNING with the user, client and session age (see
+    :mod:`outline_mcp.moneta.session_log`); the outcome is FastMCP's, unchanged.
     """
 
     def _create_upstream_oauth_client(self) -> AsyncOAuth2Client:
@@ -249,7 +259,7 @@ class OutlineCognitoProvider(AWSCognitoProvider):
         """
         validated = await super().load_access_token(token)
         if validated is None:
-            logger.debug("load_access_token: upstream validation returned None (token invalid/expired)")
+            await self._log_rejected_session(token)
             return None
 
         upstream = await self._resolve_upstream_claims(token)
@@ -316,4 +326,60 @@ class OutlineCognitoProvider(AWSCognitoProvider):
             return await self._extract_upstream_claims(raw, include_access_token=True)
         except Exception as exc:  # noqa: BLE001 — fail closed on any resolution error
             logger.warning("Cognito: failed to resolve upstream id_token: %s", exc)
+            return None
+
+    async def _try_transparent_refresh(self, upstream_token_set: UpstreamTokenSet) -> UpstreamTokenSet:
+        try:
+            return await super()._try_transparent_refresh(upstream_token_set)
+        except Exception as exc:
+            logger.warning("Transparent upstream refresh failed: %s", describe_failure(upstream_token_set, exc))
+            raise
+
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        try:
+            return await super().exchange_refresh_token(client, refresh_token, scopes)
+        except Exception as exc:
+            token_set = await self._find_upstream_token_set(refresh_token.token, token_use="refresh")
+            sealed_claims = self._sealed_upstream_claims(refresh_token.token, token_use="refresh")
+            logger.warning(
+                "Upstream token refresh failed: %s",
+                describe_failure(
+                    token_set, exc.__cause__ or exc, client_id=client.client_id, sealed_claims=sealed_claims
+                ),
+            )
+            raise
+
+    async def _log_rejected_session(self, token: str) -> None:
+        token_set = await self._find_upstream_token_set(token)
+        if token_set is None:
+            logger.debug("load_access_token: upstream validation returned None (token invalid/expired)")
+            return
+        logger.warning("Upstream token validation failed, returning 401: %s", describe_session(token_set))
+
+    def _sealed_upstream_claims(self, token: str, *, token_use: str) -> dict[str, Any] | None:
+        """``upstream_claims`` sealed in an issued FastMCP token, or ``None``; never raises."""
+        try:
+            claims = self.jwt_issuer.verify_token(token, expected_token_use=token_use).get(UPSTREAM_CLAIMS_KEY)
+        except Exception:
+            return None
+        return claims if isinstance(claims, dict) else None
+
+    async def _find_upstream_token_set(self, token: str, *, token_use: str = "access") -> UpstreamTokenSet | None:
+        """Stored upstream token set behind an issued FastMCP token, or ``None`` on any miss.
+
+        Used only to describe a failure, so it never raises: a lookup error must not
+        change the auth outcome it is reporting on.
+        """
+        try:
+            jti = self.jwt_issuer.verify_token(token, expected_token_use=token_use)["jti"]
+            jti_mapping = await self._jti_mapping_store.get(key=jti)
+            if not jti_mapping:
+                return None
+            return await self._upstream_token_store.get(key=jti_mapping.upstream_token_id)
+        except Exception:
             return None
