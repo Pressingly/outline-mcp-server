@@ -1,7 +1,8 @@
-"""Refresh failures are logged at WARNING with the user, client and session age, never a token."""
+"""Refresh failures are logged at WARNING with the user, client and session age, never a token or an email."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -18,7 +19,7 @@ from key_value.aio.stores.memory import MemoryStore
 from mcp.server.auth.provider import RefreshToken, TokenError
 from mcp.shared.auth import OAuthClientInformationFull
 
-from outline_mcp.moneta import session_log
+from outline_mcp.moneta import cognito, session_log
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
 
 TOKEN_ENDPOINT = "https://auth.example.test/token"
@@ -115,9 +116,27 @@ def _bad_gateway() -> httpx.Response:
     return httpx.Response(502, text="<html>Bad Gateway</html>", request=httpx.Request("POST", TOKEN_ENDPOINT))
 
 
-def _invalid_grant() -> httpx.Response:
-    body = {"error": "invalid_grant", "error_description": "Refresh Token has expired"}
+def _oauth_error(description: object = "Refresh Token has expired") -> httpx.Response:
+    body = {"error": "invalid_grant", "error_description": description}
     return httpx.Response(400, json=body, request=httpx.Request("POST", TOKEN_ENDPOINT))
+
+
+def _client() -> OAuthClientInformationFull:
+    return OAuthClientInformationFull(client_id=CLIENT_ID, redirect_uris=["http://localhost:3000/callback"])
+
+
+def _refresh(token: str) -> RefreshToken:
+    return RefreshToken(token=token, client_id=CLIENT_ID, scopes=["openid"])
+
+
+def _sealed_refresh_jwt(provider: OutlineCognitoProvider, jti: str = "jti-gone") -> str:
+    return provider.jwt_issuer.issue_refresh_token(
+        client_id=CLIENT_ID,
+        scopes=["openid"],
+        jti=jti,
+        expires_in=3600,
+        upstream_claims={"id_token": _id_token(), "email": EMAIL, "cognito:username": USERNAME},
+    )
 
 
 def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -127,10 +146,15 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 def _assert_no_secrets(caplog: pytest.LogCaptureFixture, *tokens: str) -> None:
     for secret in (REFRESH_SECRET, ACCESS_SECRET, _id_token(), UPSTREAM_TOKEN_ID, *tokens):
         assert secret not in caplog.text
+    assert all("@" not in record.getMessage() for record in caplog.records)
 
 
 def _fingerprint() -> str:
     return hashlib.sha256(UPSTREAM_TOKEN_ID.encode()).hexdigest()[:8]
+
+
+def _explode(*args, **kwargs):
+    raise RuntimeError("formatter broke")
 
 
 async def test_transparent_refresh_failure_names_the_session(provider, warnings_log, monkeypatch):
@@ -139,11 +163,10 @@ async def test_transparent_refresh_failure_names_the_session(provider, warnings_
 
     assert await provider.load_access_token(token) is None
 
-    transparent, rejected = _warnings(warnings_log)
-    assert transparent.startswith("Transparent upstream refresh failed: ")
+    background, rejected = _warnings(warnings_log)
+    assert background.startswith("MCP session refresh failed (background): ")
     for field in (
         f"sub={SUB}",
-        f"email={EMAIL}",
         f"username={USERNAME}",
         f"client_id={CLIENT_ID}",
         "session_age=5d00h00m",
@@ -152,28 +175,28 @@ async def test_transparent_refresh_failure_names_the_session(provider, warnings_
         "status=502",
         "oauth_error=-",
     ):
-        assert field in transparent
-    assert rejected.startswith("Upstream token validation failed, returning 401: ")
-    assert f"sub={SUB}" in rejected
+        assert field in background
+    assert rejected.startswith("MCP session rejected (401): ")
+    assert f"username={USERNAME}" in rejected
     assert "refresh_token=present" in rejected
     _assert_no_secrets(warnings_log, token)
 
 
 async def test_transparent_refresh_failure_reports_the_oauth_error(provider, warnings_log, monkeypatch):
-    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_invalid_grant()))
+    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_oauth_error()))
     token = await _seed(provider, _token_set())
 
     assert await provider.load_access_token(token) is None
 
-    transparent = _warnings(warnings_log)[0]
-    assert "error=OAuthError" in transparent
-    assert "status=-" in transparent
-    assert "oauth_error=invalid_grant" in transparent
-    assert 'detail="Refresh Token has expired"' in transparent
+    background = _warnings(warnings_log)[0]
+    assert "error=OAuthError" in background
+    assert "status=-" in background
+    assert "oauth_error=invalid_grant" in background
+    assert 'detail="Refresh Token has expired"' in background
 
 
 async def test_transparent_refresh_reraises_the_upstream_error(provider, monkeypatch):
-    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_invalid_grant()))
+    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_oauth_error()))
 
     with pytest.raises(OAuthError):
         await provider._try_transparent_refresh(_token_set())
@@ -185,22 +208,58 @@ async def test_invalid_client_token_stays_quiet(provider, warnings_log):
     assert _warnings(warnings_log) == []
 
 
+async def test_rejected_session_still_returns_none_when_formatting_breaks(provider, warnings_log, monkeypatch):
+    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_bad_gateway()))
+    monkeypatch.setattr(session_log, "describe_failure", _explode)
+    monkeypatch.setattr(session_log, "describe_session", _explode)
+    token = await _seed(provider, _token_set())
+
+    assert await provider.load_access_token(token) is None
+
+    assert _warnings(warnings_log) == [
+        "MCP session refresh failed (background): context_error=RuntimeError",
+        "MCP session rejected (401): context_error=RuntimeError",
+    ]
+
+
+async def test_rejected_session_lookup_is_bounded(provider, warnings_log, monkeypatch):
+    async def stalled_store(jti: str) -> None:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(cognito, "SESSION_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(provider, "_stored_token_set", stalled_store)
+    token = provider.jwt_issuer.issue_access_token(
+        client_id=CLIENT_ID,
+        scopes=["openid"],
+        jti="jti-access",
+        expires_in=3600,
+        upstream_claims={"id_token": _id_token()},
+    )
+    await _seed(provider, _token_set(refresh_token=None))
+
+    assert await provider.load_access_token(token) is None
+
+    (line,) = _warnings(warnings_log)
+    assert line.startswith("MCP session rejected (401): ")
+    assert f"username={USERNAME}" in line
+    assert "session_age=-" in line
+    assert "session_lookup=timeout" in line
+
+
 async def test_client_refresh_failure_names_the_session(provider, warnings_log, monkeypatch):
     monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_bad_gateway()))
     refresh_jwt = await _seed(provider, _token_set(), refresh=True)
-    client = OAuthClientInformationFull(client_id=CLIENT_ID, redirect_uris=["http://localhost:3000/callback"])
-    refresh = RefreshToken(token=refresh_jwt, client_id=CLIENT_ID, scopes=["openid"])
 
     with pytest.raises(TokenError) as raised:
-        await provider.exchange_refresh_token(client, refresh, ["openid"])
+        await provider.exchange_refresh_token(_client(), _refresh(refresh_jwt), ["openid"])
 
     assert raised.value.error == "invalid_grant"
     assert raised.value.error_description.startswith("Upstream refresh failed: Server error '502 Bad Gateway'")
     (line,) = _warnings(warnings_log)
-    assert line.startswith("Upstream token refresh failed: ")
+    assert line.startswith("MCP session refresh failed (client): ")
     for field in (
         f"sub={SUB}",
-        f"email={EMAIL}",
+        f"username={USERNAME}",
         f"client_id={CLIENT_ID}",
         "session_age=5d00h00m",
         f"upstream_token={_fingerprint()}",
@@ -211,27 +270,82 @@ async def test_client_refresh_failure_names_the_session(provider, warnings_log, 
     _assert_no_secrets(warnings_log, refresh_jwt)
 
 
+async def test_client_refresh_survives_a_non_string_error_description(provider, warnings_log, monkeypatch):
+    response = _oauth_error({"reason": "expired"})
+    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(response))
+    refresh_jwt = await _seed(provider, _token_set(), refresh=True)
+
+    with pytest.raises(TokenError) as raised:
+        await provider.exchange_refresh_token(_client(), _refresh(refresh_jwt), ["openid"])
+
+    assert raised.value.error == "invalid_grant"
+    (line,) = _warnings(warnings_log)
+    assert "oauth_error=invalid_grant" in line
+    assert "expired" in line
+
+
+async def test_client_refresh_keeps_the_token_error_when_formatting_breaks(provider, warnings_log, monkeypatch):
+    monkeypatch.setattr(AWSCognitoProvider, "_create_upstream_oauth_client", _upstream_client(_bad_gateway()))
+    monkeypatch.setattr(session_log, "describe_failure", _explode)
+    refresh_jwt = await _seed(provider, _token_set(), refresh=True)
+
+    with pytest.raises(TokenError) as raised:
+        await provider.exchange_refresh_token(_client(), _refresh(refresh_jwt), ["openid"])
+
+    assert raised.value.error == "invalid_grant"
+    assert raised.value.error_description.startswith("Upstream refresh failed: ")
+    assert _warnings(warnings_log) == ["MCP session refresh failed (client): context_error=RuntimeError"]
+
+
 async def test_client_refresh_failure_without_a_mapping_names_the_user_from_the_sealed_claims(provider, warnings_log):
-    refresh_jwt = provider.jwt_issuer.issue_refresh_token(
-        client_id=CLIENT_ID,
-        scopes=["openid"],
-        jti="jti-gone",
-        expires_in=3600,
-        upstream_claims={"id_token": _id_token(), "email": EMAIL},
-    )
-    client = OAuthClientInformationFull(client_id=CLIENT_ID, redirect_uris=["http://localhost:3000/callback"])
-    refresh = RefreshToken(token=refresh_jwt, client_id=CLIENT_ID, scopes=["openid"])
+    refresh_jwt = _sealed_refresh_jwt(provider)
 
     with pytest.raises(TokenError):
-        await provider.exchange_refresh_token(client, refresh, ["openid"])
+        await provider.exchange_refresh_token(_client(), _refresh(refresh_jwt), ["openid"])
 
     (line,) = _warnings(warnings_log)
     assert f"client_id={CLIENT_ID}" in line
     assert f"sub={SUB}" in line
+    assert f"username={USERNAME}" in line
     assert "session_age=-" in line
     assert "oauth_error=invalid_grant" in line
     assert 'detail="Refresh token mapping not found"' in line
     _assert_no_secrets(warnings_log, refresh_jwt)
+
+
+async def test_unknown_refresh_token_names_the_user(provider, warnings_log):
+    refresh_jwt = _sealed_refresh_jwt(provider)
+
+    assert await provider.load_refresh_token(_client(), refresh_jwt) is None
+
+    (line,) = _warnings(warnings_log)
+    assert line == f"MCP session refresh token unknown: sub={SUB} username={USERNAME} client_id={CLIENT_ID} " + (
+        "session_age=- upstream_token=-"
+    )
+    _assert_no_secrets(warnings_log, refresh_jwt)
+
+
+async def test_unknown_unverifiable_refresh_token_still_names_the_client(provider, warnings_log, monkeypatch):
+    monkeypatch.setattr(session_log, "describe_identity", _explode)
+
+    assert await provider.load_refresh_token(_client(), "forged.refresh.token") is None
+
+    assert _warnings(warnings_log) == ["MCP session refresh token unknown: context_error=RuntimeError"]
+
+
+def test_describe_failure_never_raises():
+    class Hostile(Exception):
+        @property
+        def response(self):
+            raise RuntimeError("no response")
+
+    assert session_log.describe_failure(_token_set(), Hostile()) == "error=Hostile"
+
+
+def test_identity_never_includes_the_email():
+    fields = session_log.identity_fields({"id_token": _id_token()})
+
+    assert fields == {"sub": SUB, "username": USERNAME}
 
 
 def test_format_age_spans_days():

@@ -2,9 +2,14 @@
 
 FastMCP logs refresh failures without saying whose session died, so a dead
 session could only be matched to a user by timing. These helpers render the
-stored upstream token set as ``key=value`` fields: the user from the stored
-id_token's claims, the MCP client, the session age and an 8-char sha256 prefix of
-the upstream token id for correlation. No token value is ever rendered.
+stored upstream token set as ``key=value`` fields: the user (``sub`` and the mPass
+id in ``cognito:username``; never the email) from the stored id_token's claims, the
+MCP client, the session age and an 8-char sha256 prefix of the upstream token id
+for correlation. No token value is ever rendered.
+
+Every ``describe_*`` function is called from inside an ``except`` block, so none of
+them may raise: a formatting error there would replace the auth error being
+reported and turn a 400/401 into a 500.
 
 Session age is measured from ``UpstreamTokenSet.created_at``, which FastMCP sets
 at the authorization-code exchange and leaves untouched on every refresh, so it
@@ -59,7 +64,7 @@ def id_token_claims(raw_token_data: Mapping[str, Any]) -> dict[str, Any]:
 
 def identity_fields(token_data: Mapping[str, Any]) -> dict[str, Any]:
     claims = id_token_claims(token_data)
-    return {"sub": claims.get("sub"), "email": claims.get("email"), "username": claims.get("cognito:username")}
+    return {"sub": claims.get("sub"), "username": claims.get("cognito:username")}
 
 
 def session_fields(
@@ -114,17 +119,37 @@ def describe_failure(
     sealed_claims: Mapping[str, Any] | None = None,
     now: float | None = None,
 ) -> str:
-    session = session_fields(token_set, client_id=client_id, sealed_claims=sealed_claims, now=now)
-    return render({**session, **error_fields(exc)})
+    try:
+        session = session_fields(token_set, client_id=client_id, sealed_claims=sealed_claims, now=now)
+        return render({**session, **error_fields(exc)})
+    except Exception:
+        return render({"error": type(exc).__name__})
 
 
 def describe_session(token_set: UpstreamTokenSet, *, now: float | None = None) -> str:
-    refresh_token = "present" if token_set.refresh_token else "absent"
-    return render({**session_fields(token_set, now=now), "refresh_token": refresh_token})
+    try:
+        refresh_token = "present" if token_set.refresh_token else "absent"
+        return render({**session_fields(token_set, now=now), "refresh_token": refresh_token})
+    except Exception:
+        return render({"session": None})
+
+
+def describe_identity(
+    sealed_claims: Mapping[str, Any] | None,
+    *,
+    client_id: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> str:
+    """Identity known without storage: the ``upstream_claims`` sealed in a verified FastMCP token."""
+    try:
+        return render({**session_fields(None, client_id=client_id, sealed_claims=sealed_claims), **(extra or {})})
+    except Exception:
+        return render({"client_id": client_id})
 
 
 def _error_text(exc: BaseException) -> str:
-    return getattr(exc, "error_description", None) or getattr(exc, "description", None) or str(exc)
+    text = getattr(exc, "error_description", None) or getattr(exc, "description", None) or exc
+    return str(text)
 
 
 def _first_line(text: str) -> str | None:
