@@ -325,7 +325,7 @@ async def test_unknown_refresh_token_names_the_user(provider, warnings_log):
     _assert_no_secrets(warnings_log, refresh_jwt)
 
 
-async def test_unknown_unverifiable_refresh_token_still_names_the_client(provider, warnings_log, monkeypatch):
+async def test_unknown_refresh_token_with_failing_formatter_still_warns(provider, warnings_log, monkeypatch):
     monkeypatch.setattr(session_log, "describe_identity", _explode)
 
     assert await provider.load_refresh_token(_client(), "forged.refresh.token") is None

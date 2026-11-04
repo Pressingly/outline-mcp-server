@@ -260,9 +260,9 @@ class OutlineCognitoProvider(AWSCognitoProvider):
             if isinstance(access_token, str) and access_token:
                 extracted[ACCESS_TOKEN_CLAIM] = access_token
         logger.debug(
-            "extract_upstream_claims: id_token_len=%d email=%s cognito:username=%s",
+            "extract_upstream_claims: id_token_len=%d has_email=%s cognito:username=%s",
             len(id_token),
-            extracted.get(EMAIL_CLAIM),
+            bool(extracted.get(EMAIL_CLAIM)),
             extracted.get(COGNITO_USERNAME_CLAIM),
         )
         return extracted
@@ -299,8 +299,7 @@ class OutlineCognitoProvider(AWSCognitoProvider):
         new_claims = dict(validated.claims or {})
         new_claims[UPSTREAM_CLAIMS_KEY] = upstream
         logger.debug(
-            "load_access_token: attached id_token identity (email=%s cognito:username=%s) over access-token sub=%s",
-            upstream.get(EMAIL_CLAIM),
+            "load_access_token: attached id_token identity (cognito:username=%s) over access-token sub=%s",
             upstream.get(COGNITO_USERNAME_CLAIM),
             new_claims.get("sub"),
         )
