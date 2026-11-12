@@ -268,10 +268,11 @@ def _identity_client(
     internal_url: str,
     http_client: httpx.AsyncClient,
     access_token: str | None = None,
+    edge: dict[str, str] | None = None,
 ) -> OutlineClient:
     """An OutlineClient that authenticates by injecting ``X-Auth-Request-Email``.
 
-    It also carries the edge secret when one is usable (see
+    ``edge`` carries the edge secret when one is usable (see
     :func:`outline_mcp.moneta.edge.edge_headers`); an unusable one is left out
     so an Outline without the edge check keeps working.
 
@@ -286,7 +287,7 @@ def _identity_client(
     oauth2-proxy forwards it on the browser path. Omitting it makes the mint 401
     ("Access denied: missing access token") on corporate-gated deployments.
     """
-    headers = {**edge_headers(), "X-Auth-Request-Email": email}
+    headers = {**(edge or {}), "X-Auth-Request-Email": email}
     if access_token:
         headers["X-Auth-Request-Access-Token"] = access_token
     return OutlineClient(
@@ -337,15 +338,15 @@ async def _mint(
     or :class:`CorporateGateError` when Outline's 401 names one of those causes.
     """
     expires_at = (datetime.now(timezone.utc) + timedelta(days=_KEY_TTL_DAYS)).isoformat()
-    edge_secret_sent = bool(edge_headers())
+    edge = edge_headers()
     try:
         # A fresh cookie-isolated client per mint — see _isolated_http_client.
         async with _isolated_http_client(transport) as http_client:
-            resp = await _identity_client(email, internal_url, http_client, access_token).post(
+            resp = await _identity_client(email, internal_url, http_client, access_token, edge).post(
                 "apiKeys.create", {"name": _KEY_NAME, "expiresAt": expires_at}
             )
     except OutlineError as exc:
-        refusal = _mint_refusal(exc, edge_secret_sent=edge_secret_sent)
+        refusal = _mint_refusal(exc, edge_secret_sent=bool(edge))
         if refusal is not None:
             logger.warning("api-key mint refused: %s", refusal)
             raise refusal from None
