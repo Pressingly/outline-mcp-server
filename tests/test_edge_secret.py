@@ -101,7 +101,7 @@ async def test_mint_leaves_an_unusable_secret_out(monkeypatch: pytest.MonkeyPatc
 async def test_ignored_headers_without_a_secret_name_the_missing_secret() -> None:
     outline = _Recorder(_outline_error(401, "Authentication required"))
 
-    with pytest.raises(apitoken.EdgeSecretMissingError, match="OUTLINE_EDGE_SECRET is unset"):
+    with pytest.raises(apitoken.EdgeSecretMissingError, match="OUTLINE_EDGE_SECRET is unset.*AUTH_TYPE=sso"):
         await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport)
 
 

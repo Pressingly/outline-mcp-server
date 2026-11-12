@@ -92,7 +92,8 @@ class EdgeSecretMissingError(OutlineClientError):
         super().__init__(
             "Outline ignored the SSO sign-in headers on the API-key mint because this server sent no edge "
             f"secret: {EDGE_SECRET_ENV} is unset, a placeholder, not printable ASCII or shorter than "
-            f"{MIN_EDGE_SECRET_LENGTH} characters. An operator must set it to Outline's MPASS_EDGE_SECRET."
+            f"{MIN_EDGE_SECRET_LENGTH} characters, or Outline is not running with AUTH_TYPE=sso. An operator "
+            "must set it to Outline's MPASS_EDGE_SECRET."
         )
 
 
