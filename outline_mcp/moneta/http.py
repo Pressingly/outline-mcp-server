@@ -36,7 +36,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from outline_mcp.moneta.apitoken import close_steady_state_client
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
+from outline_mcp.moneta.edge import edge_secret_startup_error
 from outline_mcp.moneta.storage import build_oauth_storage
 from outline_mcp.server import INSTRUCTIONS, get_http_mcp
 from outline_mcp.tools import register_tools
@@ -277,6 +279,9 @@ def validate_env() -> None:
             "the container filesystem and is lost on recreation. Point it at a "
             "Valkey/Redis URL (e.g. redis://valkey:6379/14)."
         )
+    edge_error = edge_secret_startup_error()
+    if edge_error:
+        logger.error(edge_error)
 
 
 async def healthz(_request: Request) -> JSONResponse:
@@ -294,7 +299,10 @@ def run() -> None:
     async def lifespan(app):
         async with cognito_app.lifespan(cognito_app):
             async with header_app.lifespan(header_app):
-                yield
+                try:
+                    yield
+                finally:
+                    await close_steady_state_client()
 
     app = Starlette(
         routes=[

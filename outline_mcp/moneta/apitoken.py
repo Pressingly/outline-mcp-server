@@ -17,8 +17,9 @@ e.g. ``http://outline:3000``) — bypassing Traefik/mPass:
    path. So we mint by calling ``apiKeys.create`` with an injected
    ``X-Auth-Request-Email`` (the identity captured from the validated Cognito
    id_token) and **no** ``Authorization`` header — reaching the ``fwd:`` path that
-   authorises the mint. Prior ``moneta-mcp``-named keys are revoked first so they
-   don't accumulate.
+   authorises the mint. The request also carries ``X-Mpass-Edge-Secret``
+   (``OUTLINE_EDGE_SECRET``), without which Outline ignores those headers; see
+   :mod:`outline_mcp.moneta.edge`. Minted keys self-expire, nothing is revoked.
 2. **Steady state:** every tool call uses ``Authorization: Bearer <ol_api_…>``.
    Identity is now proven by *key possession*, not by trusting whatever sets a
    header — the property that makes this safe across separate K8s pods.
@@ -32,8 +33,10 @@ time (``presentApiKey`` → ``data.value``), so it must be cached, not re-fetche
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime, timedelta, timezone
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,6 +47,12 @@ from fastmcp.utilities.logging import get_logger
 
 from outline_mcp.client import OutlineClientError
 from outline_mcp.moneta.client import identity_email_for, stored_access_token, upstream_access_token_for
+from outline_mcp.moneta.edge import (
+    EDGE_SECRET_ENV,
+    MIN_EDGE_SECRET_LENGTH,
+    edge_headers,
+    guarded_http_client,
+)
 from outline_mcp.outline_client import OutlineClient, OutlineError
 
 logger = get_logger(__name__)
@@ -71,6 +80,38 @@ _memory_cache: dict[str, str] = {}
 # the single-threaded asyncio loop. (Cross-pod, each process mints its own
 # self-expiring key — bounded and race-free, since we never delete.)
 _locks: dict[str, asyncio.Lock] = {}
+
+# Outline's messages for a 401 on the fwd: path. The error id is
+# "authentication_required" for all of them, so the message tells them apart.
+_HEADERS_IGNORED_MESSAGE = "authentication required"
+_CORPORATE_GATE_MESSAGE = "access denied"
+
+
+class EdgeSecretMissingError(OutlineClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Outline ignored the SSO sign-in headers on the API-key mint because this server sent no edge "
+            f"secret: {EDGE_SECRET_ENV} is unset, a placeholder, not printable ASCII or shorter than "
+            f"{MIN_EDGE_SECRET_LENGTH} characters, or Outline is not running with AUTH_TYPE=sso. An operator "
+            "must set it to Outline's MPASS_EDGE_SECRET."
+        )
+
+
+class EdgeSecretRejectedError(OutlineClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Outline ignored the SSO sign-in headers on the API-key mint although this server sent its edge "
+            f"secret. An operator must check that {EDGE_SECRET_ENV} matches Outline's MPASS_EDGE_SECRET, that "
+            "MPASS_EDGE_SECRET is set (32+ characters), and that Outline runs with AUTH_TYPE=sso."
+        )
+
+
+class CorporateGateError(OutlineClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Outline's corporate-ID gate refused the API-key mint: the forwarded mPass token is missing, "
+            "expired, issued to another client (MPASS_OIDC_CLIENT_ID), or not from this organisation."
+        )
 
 
 def _lock_for(identity: str) -> asyncio.Lock:
@@ -152,7 +193,20 @@ def _cache_set(identity: str, key: str) -> None:
 # --- mint (bootstrap via header-injection on the internal URL) -------------
 
 
-def _isolated_http_client() -> httpx.AsyncClient:
+def _verify_ssl() -> bool:
+    return os.getenv("OUTLINE_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
+
+
+def _timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=float(os.getenv("OUTLINE_CONNECT_TIMEOUT", "5.0")),
+        read=float(os.getenv("OUTLINE_TIMEOUT", "30.0")),
+        write=float(os.getenv("OUTLINE_WRITE_TIMEOUT", "30.0")),
+        pool=5.0,
+    )
+
+
+def _isolated_http_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
     """A fresh httpx client with its OWN empty cookie jar, for the mint only.
 
     The mint MUST NOT use ``OutlineClient``'s process-wide shared pool. On the
@@ -165,18 +219,49 @@ def _isolated_http_client() -> httpx.AsyncClient:
     mint cookie-isolated. Mints are rare (once per user per cache lifetime), so
     forgoing the connection pool here is cheap.
     """
-    verify_ssl = os.getenv("OUTLINE_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
-    read_timeout = float(os.getenv("OUTLINE_TIMEOUT", "30.0"))
-    connect_timeout = float(os.getenv("OUTLINE_CONNECT_TIMEOUT", "5.0"))
-    write_timeout = float(os.getenv("OUTLINE_WRITE_TIMEOUT", "30.0"))
     # follow_redirects=False: a mint is a single POST that never legitimately
-    # redirects. Following one could replay a just-set accessToken cookie within
-    # the request (the same CSRF-trip vector this isolation defends against).
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=connect_timeout, read=read_timeout, write=write_timeout, pool=5.0),
-        follow_redirects=False,
-        verify=verify_ssl,
-    )
+    # redirects. Following one could replay a just-set accessToken cookie, or
+    # carry the edge secret and identity headers to another host.
+    return httpx.AsyncClient(timeout=_timeout(), follow_redirects=False, verify=_verify_ssl(), transport=transport)
+
+
+class _RefuseAllCookies(DefaultCookiePolicy):
+    def set_ok(self, cookie, request) -> bool:  # noqa: ANN001 — stdlib signature
+        return False
+
+
+_steady_state_client: httpx.AsyncClient | None = None
+
+
+def steady_state_http_client() -> httpx.AsyncClient:
+    """The process-wide client for minted-key (Bearer) calls.
+
+    It refuses cookies, so no Outline session can leak between users, and its
+    request hook refuses ``X-Auth-Request-*`` and ``X-Mpass-Edge-Secret``: only
+    the mint may send those. The refusing jar is passed as is, since wrapping
+    it in ``httpx.Cookies()`` would copy it into a jar with the default policy.
+    """
+    global _steady_state_client
+    if _steady_state_client is None or _steady_state_client.is_closed:
+        _steady_state_client = guarded_http_client(
+            timeout=_timeout(),
+            limits=httpx.Limits(
+                max_connections=int(os.getenv("OUTLINE_MAX_CONNECTIONS", "100")),
+                max_keepalive_connections=int(os.getenv("OUTLINE_MAX_KEEPALIVE", "20")),
+                keepalive_expiry=30.0,
+            ),
+            follow_redirects=True,
+            verify=_verify_ssl(),
+            cookies=CookieJar(policy=_RefuseAllCookies()),
+        )
+    return _steady_state_client
+
+
+async def close_steady_state_client() -> None:
+    global _steady_state_client
+    if _steady_state_client is not None:
+        await _steady_state_client.aclose()
+        _steady_state_client = None
 
 
 def _identity_client(
@@ -184,8 +269,13 @@ def _identity_client(
     internal_url: str,
     http_client: httpx.AsyncClient,
     access_token: str | None = None,
+    edge: dict[str, str] | None = None,
 ) -> OutlineClient:
     """An OutlineClient that authenticates by injecting ``X-Auth-Request-Email``.
+
+    ``edge`` carries the edge secret when one is usable (see
+    :func:`outline_mcp.moneta.edge.edge_headers`); an unusable one is left out
+    so an Outline without the edge check keeps working.
 
     Used only to bootstrap the key (``apiKeys.create``) on Outline's ``fwd:`` APP
     path. No ``Authorization`` header — see the module docstring for why that
@@ -198,7 +288,7 @@ def _identity_client(
     oauth2-proxy forwards it on the browser path. Omitting it makes the mint 401
     ("Access denied: missing access token") on corporate-gated deployments.
     """
-    headers = {"X-Auth-Request-Email": email}
+    headers = {**(edge or {}), "X-Auth-Request-Email": email}
     if access_token:
         headers["X-Auth-Request-Access-Token"] = access_token
     return OutlineClient(
@@ -208,22 +298,59 @@ def _identity_client(
     )
 
 
-async def _mint(email: str, internal_url: str, access_token: str | None = None) -> str | None:
+def _error_message(exc: OutlineError) -> str:
+    response = getattr(exc.__cause__, "response", None)
+    if response is None:
+        return ""
+    try:
+        body = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return ""
+    message = body.get("message") if isinstance(body, dict) else None
+    return message.strip().lower() if isinstance(message, str) else ""
+
+
+def _mint_refusal(exc: OutlineError, *, edge_secret_sent: bool) -> OutlineClientError | None:
+    """The operator-facing error for a 401 Outline gives only to the fwd: path, or ``None``."""
+    if exc.status_code != 401:
+        return None
+    message = _error_message(exc)
+    if message == _HEADERS_IGNORED_MESSAGE:
+        return EdgeSecretRejectedError() if edge_secret_sent else EdgeSecretMissingError()
+    if message == _CORPORATE_GATE_MESSAGE:
+        return CorporateGateError()
+    return None
+
+
+async def _mint(
+    email: str,
+    internal_url: str,
+    access_token: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str | None:
     """Mint a self-expiring ``ol_api_`` key for the SSO user via the ``fwd:`` APP path.
 
     Returns the raw key (``data.value``, populated only at create time), or ``None``
     on failure. The key carries ``expiresAt`` so it self-cleans — we never delete
     keys (a revoke-on-mint would race concurrent/cross-pod mints). ``access_token``
     is forwarded to clear Outline's corporate-ID gate (see :func:`_identity_client`).
+
+    Raises :class:`EdgeSecretMissingError`, :class:`EdgeSecretRejectedError`
+    or :class:`CorporateGateError` when Outline's 401 names one of those causes.
     """
     expires_at = (datetime.now(timezone.utc) + timedelta(days=_KEY_TTL_DAYS)).isoformat()
+    edge = edge_headers()
     try:
         # A fresh cookie-isolated client per mint — see _isolated_http_client.
-        async with _isolated_http_client() as http_client:
-            resp = await _identity_client(email, internal_url, http_client, access_token).post(
+        async with _isolated_http_client(transport) as http_client:
+            resp = await _identity_client(email, internal_url, http_client, access_token, edge).post(
                 "apiKeys.create", {"name": _KEY_NAME, "expiresAt": expires_at}
             )
     except OutlineError as exc:
+        refusal = _mint_refusal(exc, edge_secret_sent=bool(edge))
+        if refusal is not None:
+            logger.warning("api-key mint refused: %s", refusal)
+            raise refusal from None
         logger.warning("api-key mint failed: %s", exc)
         return None
     value = (resp.get("data") or {}).get("value")
@@ -301,4 +428,4 @@ async def build_outline_client() -> OutlineClient | None:
         raise OutlineClientError("Failed to mint an Outline API key for the SSO user")
 
     logger.debug("build_outline_client: Cognito path — using minted key for identity=%s", identity)
-    return OutlineClient(api_key=key, api_url=url)
+    return OutlineClient(api_key=key, api_url=url, http_client=steady_state_http_client())
