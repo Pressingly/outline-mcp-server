@@ -256,12 +256,7 @@ async def test_mint_does_not_replay_accesstoken_cookie_across_retry(
 
     # Inject only the transport; the real _isolated_http_client's follow_redirects
     # and the real post() retry/clear logic are what we're testing.
-    def _mock_isolated() -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
-
-    monkeypatch.setattr(apitoken, "_isolated_http_client", _mock_isolated)
-
-    key = await apitoken._mint("u@example.com", "http://outline:3000")
+    key = await apitoken._mint("u@example.com", "http://outline:3000", transport=httpx.MockTransport(handler))
 
     assert key == "ol_api_minted"
     assert calls["n"] == 2  # retried once after the 429
@@ -296,12 +291,9 @@ async def _capture_mint_headers(monkeypatch: pytest.MonkeyPatch, access_token: s
         captured.update(request.headers)
         return httpx.Response(200, json={"data": {"value": "ol_api_minted"}})
 
-    monkeypatch.setattr(
-        apitoken,
-        "_isolated_http_client",
-        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False),
+    key = await apitoken._mint(
+        "u@example.com", "http://outline:3000", access_token, transport=httpx.MockTransport(handler)
     )
-    key = await apitoken._mint("u@example.com", "http://outline:3000", access_token)
     assert key == "ol_api_minted"
     return captured
 

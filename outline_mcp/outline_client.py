@@ -188,15 +188,16 @@ class OutlineClient:
         return client
 
     def _clear_isolated_jar(self) -> None:
-        """Empty the per-instance client's cookie jar before a retry attempt.
+        """Empty a per-instance client's cookie jar before each attempt.
 
-        A dedicated per-instance client (the fwd: mint) authenticates by header
-        only and must NEVER send a cookie. Clearing any Set-Cookie (e.g. Outline's
+        A per-instance client (the fwd: mint, or the Moneta steady-state Bearer
+        client) must NEVER send a cookie. Clearing any Set-Cookie (e.g. Outline's
         accessToken on a 429) before each attempt stops a retry from replaying it,
         flipping the transport to `cookie`, and tripping CSRF. No-op on the shared
-        pool. Race-free: an isolated client is used by a single request task.
+        pool, and on a jar that holds nothing, such as the steady-state client's
+        cookie-refusing jar, which is shared across concurrent requests.
         """
-        if self._http_client is not None:
+        if self._http_client is not None and self._http_client.cookies.jar:
             self._http_client.cookies.clear()
 
     @classmethod
