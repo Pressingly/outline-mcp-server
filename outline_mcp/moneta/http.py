@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 from outline_mcp.moneta.apitoken import close_steady_state_client
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
 from outline_mcp.moneta.edge import edge_secret_startup_error
-from outline_mcp.moneta.header_route import HEADER_API_URL_ENV, HeaderKeyGate
+from outline_mcp.moneta.header_route import HEADER_API_URL_ENV, HeaderKeyGate, internal_route_enabled
 from outline_mcp.moneta.storage import build_oauth_storage
 from outline_mcp.server import INSTRUCTIONS, get_http_mcp
 from outline_mcp.tools import register_tools
@@ -57,6 +57,12 @@ def enabled() -> bool:
         "enabled" if on else "disabled",
         "set" if on else "unset",
     )
+    if not on and internal_route_enabled():
+        logger.warning(
+            "%s is set but COGNITO_USER_POOL_ID is not: the gated /http/api-key route is not served, "
+            "so header-mode calls keep OUTLINE_API_URL.",
+            HEADER_API_URL_ENV,
+        )
     return on
 
 

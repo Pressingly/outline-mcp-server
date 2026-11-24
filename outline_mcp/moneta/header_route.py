@@ -22,6 +22,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+from contextvars import ContextVar
 
 import httpx
 from starlette.datastructures import Headers
@@ -29,7 +30,6 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from outline_mcp.moneta.apitoken import steady_state_http_client
-from outline_mcp.moneta.client import stored_access_token
 from outline_mcp.outline_client import OutlineClient, _sanitize_value
 
 logger = logging.getLogger("fastmcp.outline_mcp.moneta.header_route")
@@ -39,6 +39,8 @@ API_KEY_HEADER = "x-outline-api-key"
 FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host")
 KEY_CHECK_TIMEOUT_SECONDS = 5.0
 SCOPE_REFUSAL_ERROR = "authorization_error"
+
+_passed_gate: ContextVar[bool] = ContextVar("outline_header_route_passed_gate", default=False)
 
 
 class KeyCheck(enum.Enum):
@@ -65,12 +67,13 @@ def _key_client(api_key: str) -> OutlineClient:
 def header_client(api_key: str | None) -> OutlineClient | None:
     """A client for a header-supplied key on the header-mode URL, or ``None``.
 
-    ``None`` without a key, and on an OAuth-authenticated request: only the
-    header route, which has no OAuth layer, may reach the internal URL with a
-    key alone. It uses the cookie-refusing steady-state client, so one
-    caller's Outline session cookie is never replayed for another caller's key.
+    Only a request that passed :class:`HeaderKeyGate` gets one: the Cognito
+    ``/mcp``, and upstream's ungated http mode (no ``COGNITO_USER_POOL_ID``),
+    keep the public ``OUTLINE_API_URL``. It uses the cookie-refusing
+    steady-state client, so one caller's Outline session cookie is never
+    replayed for another caller's key.
     """
-    if not api_key or stored_access_token() is not None:
+    if not api_key or not _passed_gate.get():
         return None
     return _key_client(api_key)
 
@@ -169,7 +172,11 @@ class HeaderKeyGate:
             return
         check = await check_request(Headers(scope=scope))
         if check is KeyCheck.VALID:
-            await self.app(scope, receive, send)
+            passed = _passed_gate.set(True)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _passed_gate.reset(passed)
             return
         logger.warning("header route refused the request: %s", check.value)
         await _refusal(check)(scope, receive, send)
