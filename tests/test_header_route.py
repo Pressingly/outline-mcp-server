@@ -14,8 +14,8 @@ from starlette.routing import Mount, Route
 from outline_mcp import client as client_module
 from outline_mcp.document_links import document_link
 from outline_mcp.moneta import apitoken, header_route
-from outline_mcp.moneta.header_route import HeaderKeyGate, KeyCheck, check_key, header_api_url
 from outline_mcp.moneta import http as moneta_http
+from outline_mcp.moneta.header_route import HeaderKeyGate, KeyCheck, check_key, header_api_url
 from outline_mcp.moneta.http import build_app
 from outline_mcp.server import get_http_mcp
 
