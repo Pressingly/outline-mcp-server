@@ -97,6 +97,14 @@ async def get_outline_client() -> OutlineClient:
         if moneta_client is not None:
             return moneta_client
 
+        # Moneta fork: a header-supplied key goes to OUTLINE_HEADER_INTERNAL_BASE_URL
+        # when set (see outline_mcp.moneta.header_route).
+        from outline_mcp.moneta.header_route import header_client
+
+        header_key_client = header_client(_get_header_api_key())
+        if header_key_client is not None:
+            return header_key_client
+
         api_key = get_resolved_api_key() or None
         api_url = os.getenv("OUTLINE_API_URL")
         return OutlineClient(api_key=api_key, api_url=api_url)

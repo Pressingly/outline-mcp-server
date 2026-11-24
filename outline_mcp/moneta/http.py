@@ -39,6 +39,7 @@ from starlette.routing import Mount, Route
 from outline_mcp.moneta.apitoken import close_steady_state_client
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
 from outline_mcp.moneta.edge import edge_secret_startup_error
+from outline_mcp.moneta.header_route import HEADER_API_URL_ENV, HeaderKeyGate
 from outline_mcp.moneta.storage import build_oauth_storage
 from outline_mcp.server import INSTRUCTIONS, get_http_mcp
 from outline_mcp.tools import register_tools
@@ -159,7 +160,7 @@ def get_cognito_http_mcp() -> FastMCP:
         provider._upstream_token_endpoint = upstream_token_url
     logger.info(
         "Cognito provider: pool=%s region=%s client_id=%s base_url=%s scopes=%s secret=%s signing_key=%s "
-        "storage=%s outline_public=%s outline_internal=%s",
+        "storage=%s outline_public=%s outline_internal=%s outline_header=%s",
         os.environ["COGNITO_USER_POOL_ID"],
         os.environ["COGNITO_AWS_REGION"],
         os.environ["OIDC_CLIENT_ID"],
@@ -170,6 +171,7 @@ def get_cognito_http_mcp() -> FastMCP:
         "valkey" if os.getenv("MCP_OAUTH_STORAGE_URL", "").strip() else "file",
         os.getenv("OUTLINE_API_URL", "<unset>"),
         os.getenv("OUTLINE_INTERNAL_BASE_URL", "<unset>"),
+        os.getenv(HEADER_API_URL_ENV, "<unset: OUTLINE_API_URL>"),
     )
 
     mcp = FastMCP(
@@ -307,8 +309,9 @@ def run() -> None:
     app = Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
-            # Per-request x-outline-api-key mode stays available alongside Cognito.
-            Mount("/http/api-key", app=header_app),
+            # Per-request x-outline-api-key mode stays available alongside Cognito;
+            # the gate answers 401 for a key Outline rejects.
+            Mount("/http/api-key", app=HeaderKeyGate(header_app)),
             # AWSCognitoProvider publishes /.well-known/* on the mounted app.
             Mount("/", app=cognito_app),
         ],
