@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from outline_mcp.moneta.apitoken import steady_state_http_client
+from outline_mcp.moneta.client import stored_access_token
 from outline_mcp.outline_client import OutlineClient, OutlineError, _sanitize_value
 
 logger = logging.getLogger("fastmcp.outline_mcp.moneta.header_route")
@@ -43,15 +44,21 @@ def header_api_url() -> str:
     return os.getenv(HEADER_API_URL_ENV, "").strip() or os.getenv("OUTLINE_API_URL", "").strip()
 
 
-def header_client(api_key: str | None) -> OutlineClient | None:
-    """A client for a header-supplied key on the header-mode URL, or ``None`` without a key.
-
-    It uses the cookie-refusing steady-state client, so one caller's Outline
-    session cookie is never replayed for another caller's key.
-    """
-    if not api_key:
-        return None
+def _key_client(api_key: str) -> OutlineClient:
     return OutlineClient(api_key=api_key, api_url=header_api_url(), http_client=steady_state_http_client())
+
+
+def header_client(api_key: str | None) -> OutlineClient | None:
+    """A client for a header-supplied key on the header-mode URL, or ``None``.
+
+    ``None`` without a key, and on an OAuth-authenticated request: only the
+    header route, which has no OAuth layer, may reach the internal URL with a
+    key alone. It uses the cookie-refusing steady-state client, so one
+    caller's Outline session cookie is never replayed for another caller's key.
+    """
+    if not api_key or stored_access_token() is not None:
+        return None
+    return _key_client(api_key)
 
 
 def _key_check_for(error: OutlineError) -> KeyCheck:
@@ -68,13 +75,15 @@ async def check_key(api_key: str | None) -> KeyCheck:
     A 403 means the key is valid but scoped away from ``auth.info``, so the
     tools decide what it may do.
     """
-    client = header_client(api_key)
-    if client is None:
+    if not api_key:
         return KeyCheck.MISSING
     try:
-        await client.get_auth_info()
+        await _key_client(api_key).get_auth_info()
     except OutlineError as error:
         return _key_check_for(error)
+    except Exception:  # noqa: BLE001 — e.g. a non-JSON 200 from a login page; fail closed
+        logger.exception("header route: the Outline key check failed unexpectedly")
+        return KeyCheck.UNAVAILABLE
     return KeyCheck.VALID
 
 

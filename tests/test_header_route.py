@@ -11,7 +11,7 @@ from starlette.routing import Mount, Route
 
 from outline_mcp import client as client_module
 from outline_mcp.document_links import document_link
-from outline_mcp.moneta import header_route
+from outline_mcp.moneta import apitoken, header_route
 from outline_mcp.moneta.header_route import HeaderKeyGate, KeyCheck, check_key, header_api_url
 
 PUBLIC_API_URL = "https://docs.example.com/api"
@@ -75,6 +75,15 @@ async def test_env_key_keeps_outline_api_url(monkeypatch: pytest.MonkeyPatch) ->
     assert outline_client.api_key == "ol_api_env"
 
 
+async def test_oauth_request_with_a_key_header_never_gets_the_internal_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_get_header_api_key", lambda: KEY)
+    monkeypatch.setattr(header_route, "stored_access_token", lambda: object())
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: None)
+    outline_client = await client_module.get_outline_client()
+    assert outline_client.api_url == PUBLIC_API_URL
+    assert outline_client._http_client is None
+
+
 def test_document_links_stay_public() -> None:
     assert document_link("/doc/plan-abc123") == "https://docs.example.com/doc/plan-abc123"
 
@@ -94,6 +103,7 @@ async def test_check_key_asks_outline_with_the_key_as_bearer(monkeypatch: pytest
         (_outline_error(403), KeyCheck.VALID),
         (_outline_error(500), KeyCheck.UNAVAILABLE),
         (httpx.ConnectError("refused"), KeyCheck.UNAVAILABLE),
+        (httpx.Response(200, text="<html>sign in</html>"), KeyCheck.UNAVAILABLE),
     ],
 )
 async def test_check_key_maps_outline_answers(
