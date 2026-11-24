@@ -39,6 +39,7 @@ from starlette.routing import Mount, Route
 from outline_mcp.moneta.apitoken import close_steady_state_client
 from outline_mcp.moneta.cognito import OutlineCognitoProvider
 from outline_mcp.moneta.edge import edge_secret_startup_error
+from outline_mcp.moneta.header_route import HEADER_API_URL_ENV, HeaderKeyGate, internal_route_enabled
 from outline_mcp.moneta.storage import build_oauth_storage
 from outline_mcp.server import INSTRUCTIONS, get_http_mcp
 from outline_mcp.tools import register_tools
@@ -56,6 +57,12 @@ def enabled() -> bool:
         "enabled" if on else "disabled",
         "set" if on else "unset",
     )
+    if not on and internal_route_enabled():
+        logger.warning(
+            "%s is set but COGNITO_USER_POOL_ID is not: the gated /http/api-key route is not served, "
+            "so header-mode calls keep OUTLINE_API_URL.",
+            HEADER_API_URL_ENV,
+        )
     return on
 
 
@@ -159,7 +166,7 @@ def get_cognito_http_mcp() -> FastMCP:
         provider._upstream_token_endpoint = upstream_token_url
     logger.info(
         "Cognito provider: pool=%s region=%s client_id=%s base_url=%s scopes=%s secret=%s signing_key=%s "
-        "storage=%s outline_public=%s outline_internal=%s",
+        "storage=%s outline_public=%s outline_internal=%s outline_header=%s",
         os.environ["COGNITO_USER_POOL_ID"],
         os.environ["COGNITO_AWS_REGION"],
         os.environ["OIDC_CLIENT_ID"],
@@ -170,6 +177,7 @@ def get_cognito_http_mcp() -> FastMCP:
         "valkey" if os.getenv("MCP_OAUTH_STORAGE_URL", "").strip() else "file",
         os.getenv("OUTLINE_API_URL", "<unset>"),
         os.getenv("OUTLINE_INTERNAL_BASE_URL", "<unset>"),
+        os.getenv(HEADER_API_URL_ENV, "<unset: OUTLINE_API_URL>"),
     )
 
     mcp = FastMCP(
@@ -288,12 +296,8 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-def run() -> None:
-    """Validate env, build the Starlette app, and serve it with uvicorn."""
-    validate_env()
-
-    cognito_app = get_cognito_http_mcp().http_app(stateless_http=True)
-    header_app = get_http_mcp().http_app(stateless_http=True)
+def build_app(cognito_app: Starlette, header_app: Starlette) -> Starlette:
+    """The served app: health check, the gated header route, and Cognito OAuth."""
 
     @asynccontextmanager
     async def lifespan(app):
@@ -307,8 +311,9 @@ def run() -> None:
     app = Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
-            # Per-request x-outline-api-key mode stays available alongside Cognito.
-            Mount("/http/api-key", app=header_app),
+            # Per-request x-outline-api-key mode stays available alongside Cognito;
+            # the gate answers 401 for a key Outline rejects and 403 to proxied callers.
+            Mount("/http/api-key", app=HeaderKeyGate(header_app)),
             # AWSCognitoProvider publishes /.well-known/* on the mounted app.
             Mount("/", app=cognito_app),
         ],
@@ -320,6 +325,17 @@ def run() -> None:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    return app
+
+
+def run() -> None:
+    """Validate env, build the Starlette app, and serve it with uvicorn."""
+    validate_env()
+
+    app = build_app(
+        get_cognito_http_mcp().http_app(stateless_http=True),
+        get_http_mcp().http_app(stateless_http=True),
     )
 
     _configure_logging()

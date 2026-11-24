@@ -26,7 +26,7 @@ htmlcov/
 .mcp-outline.env
 
 # Lockfile (kept out of the base repo; add back if vendoring)
-# uv.lock
+uv.lock
 
 # OS / editor
 .DS_Store
