@@ -46,7 +46,7 @@ from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from fastmcp.utilities.logging import get_logger
 
 from outline_mcp.client import OutlineClientError
-from outline_mcp.moneta.client import identity_email_for, stored_access_token, upstream_access_token_for
+from outline_mcp.moneta.client import MintProof, identity_email_for, mint_proof_for, stored_access_token
 from outline_mcp.moneta.edge import (
     EDGE_SECRET_ENV,
     MIN_EDGE_SECRET_LENGTH,
@@ -111,6 +111,15 @@ class CorporateGateError(OutlineClientError):
         super().__init__(
             "Outline's corporate-ID gate refused the API-key mint: the forwarded mPass token is missing, "
             "expired, issued to another client (MPASS_OIDC_CLIENT_ID), or not from this organisation."
+        )
+
+
+class MintProofMissingError(OutlineClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "No Outline API key was minted for the SSO user: the sign-in carries no upstream access token or "
+            "no cognito:username, and Outline accepts the SSO identity only when both are forwarded. Sign in "
+            "to the MCP connector again."
         )
 
 
@@ -268,7 +277,7 @@ def _identity_client(
     email: str,
     internal_url: str,
     http_client: httpx.AsyncClient,
-    access_token: str | None = None,
+    proof: MintProof,
     edge: dict[str, str] | None = None,
 ) -> OutlineClient:
     """An OutlineClient that authenticates by injecting ``X-Auth-Request-Email``.
@@ -282,15 +291,17 @@ def _identity_client(
     matters. ``http_client`` is a caller-owned, cookie-isolated client (see
     :func:`_isolated_http_client`), never the shared pool.
 
-    When ``access_token`` is set, it is forwarded as ``X-Auth-Request-Access-Token``
-    — the header Outline's ``fwd:`` corporate-ID gate (``SMB_CORPORATE_ID``) reads
-    to verify ``custom:corporate_id``/``custom:is_corporate``, exactly as
-    oauth2-proxy forwards it on the browser path. Omitting it makes the mint 401
-    ("Access denied: missing access token") on corporate-gated deployments.
+    ``proof`` supplies ``X-Auth-Request-Access-Token`` and
+    ``X-Auth-Request-Preferred-Username``, the same pair oauth2-proxy forwards on
+    the browser path. Outline verifies the token and refuses the mint unless the
+    username matches it and the email is bound to it (FOSS-836).
     """
-    headers = {**(edge or {}), "X-Auth-Request-Email": email}
-    if access_token:
-        headers["X-Auth-Request-Access-Token"] = access_token
+    headers = {
+        **(edge or {}),
+        "X-Auth-Request-Email": email,
+        "X-Auth-Request-Preferred-Username": proof.username,
+        "X-Auth-Request-Access-Token": proof.access_token,
+    }
     return OutlineClient(
         api_url=internal_url,
         auth_headers=headers,
@@ -325,15 +336,15 @@ def _mint_refusal(exc: OutlineError, *, edge_secret_sent: bool) -> OutlineClient
 async def _mint(
     email: str,
     internal_url: str,
-    access_token: str | None = None,
+    proof: MintProof,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> str | None:
     """Mint a self-expiring ``ol_api_`` key for the SSO user via the ``fwd:`` APP path.
 
     Returns the raw key (``data.value``, populated only at create time), or ``None``
     on failure. The key carries ``expiresAt`` so it self-cleans — we never delete
-    keys (a revoke-on-mint would race concurrent/cross-pod mints). ``access_token``
-    is forwarded to clear Outline's corporate-ID gate (see :func:`_identity_client`).
+    keys (a revoke-on-mint would race concurrent/cross-pod mints). ``proof`` binds
+    the email to a verified token (see :func:`_identity_client`).
 
     Raises :class:`EdgeSecretMissingError`, :class:`EdgeSecretRejectedError`
     or :class:`CorporateGateError` when Outline's 401 names one of those causes.
@@ -343,7 +354,7 @@ async def _mint(
     try:
         # A fresh cookie-isolated client per mint — see _isolated_http_client.
         async with _isolated_http_client(transport) as http_client:
-            resp = await _identity_client(email, internal_url, http_client, access_token, edge).post(
+            resp = await _identity_client(email, internal_url, http_client, proof, edge).post(
                 "apiKeys.create", {"name": _KEY_NAME, "expiresAt": expires_at}
             )
     except OutlineError as exc:
@@ -361,14 +372,15 @@ async def _mint(
     return value
 
 
-async def _get_or_mint(identity: str, internal_url: str, access_token: str | None = None) -> str | None:
+async def _get_or_mint(identity: str, internal_url: str, proof: MintProof | None = None) -> str | None:
     """Return the cached ``ol_api_`` key for ``identity``, minting + caching if absent.
 
     A per-identity lock serializes the cache-miss path so parallel tool calls for
     the same user mint at most once (the rest cache-hit on the double-check).
-    ``access_token`` is used only on the mint (cache-miss) path — it is NOT part
-    of the cache key (the minted key belongs to the identity, and the access token
-    rotates hourly).
+    ``proof`` is used only on the mint (cache-miss) path — it is NOT part of the
+    cache key (the minted key belongs to the identity, and the access token
+    rotates hourly). A cache miss without one raises :class:`MintProofMissingError`
+    rather than send a mint Outline would refuse.
     """
     cached = _cache_get(identity)
     if cached:
@@ -378,7 +390,10 @@ async def _get_or_mint(identity: str, internal_url: str, access_token: str | Non
         cached = _cache_get(identity)  # double-check: another task may have minted
         if cached:
             return cached
-        key = await _mint(identity, internal_url, access_token)
+        if proof is None:
+            logger.warning("api-key mint skipped: no upstream access token or cognito:username to forward")
+            raise MintProofMissingError()
+        key = await _mint(identity, internal_url, proof)
         if key:
             _cache_set(identity, key)
             logger.debug("api-key: minted + cached for identity=%s", identity)
@@ -411,20 +426,8 @@ async def build_outline_client() -> OutlineClient | None:
             "to mint and use the per-user Outline API key."
         )
 
-    # Forwarded as X-Auth-Request-Access-Token so the mint clears Outline's
-    # corporate-ID gate (SMB_CORPORATE_ID). Only consumed on a cache-miss mint.
-    access_token = upstream_access_token_for(stored.claims)
-    key = await _get_or_mint(identity, url, access_token)
+    key = await _get_or_mint(identity, url, mint_proof_for(stored.claims))
     if not key:
-        # A corporate-gated Outline (SMB_CORPORATE_ID) rejects the mint when no
-        # access token is forwarded; surface that likely cause rather than a bare
-        # failure (the real reason is also in the mint's warning log).
-        if access_token is None:
-            raise OutlineClientError(
-                "Failed to mint an Outline API key for the SSO user: no upstream access "
-                "token was available to forward. If this Outline enforces SMB_CORPORATE_ID, "
-                "the mint cannot clear its corporate-ID gate without one."
-            )
         raise OutlineClientError("Failed to mint an Outline API key for the SSO user")
 
     logger.debug("build_outline_client: Cognito path — using minted key for identity=%s", identity)

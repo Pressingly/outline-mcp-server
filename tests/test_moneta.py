@@ -14,8 +14,8 @@ import pytest
 
 from outline_mcp.client import OutlineClientError
 from outline_mcp.moneta import apitoken
-from outline_mcp.moneta.client import identity_email_for
-from outline_mcp.moneta.cognito import ID_TOKEN_KEY, UPSTREAM_CLAIMS_KEY
+from outline_mcp.moneta.client import MintProof, identity_email_for, mint_proof_for
+from outline_mcp.moneta.cognito import ACCESS_TOKEN_CLAIM, ID_TOKEN_KEY, UPSTREAM_CLAIMS_KEY
 from outline_mcp.outline_client import OutlineClient
 
 
@@ -26,6 +26,18 @@ def _claims(id_token: str = "idtok", email: str | None = "u@example.com", userna
     if username is not None:
         upstream["cognito:username"] = username
     return {UPSTREAM_CLAIMS_KEY: upstream}
+
+
+PROOF = MintProof(username="1020010", access_token="acc.tok.jwt")
+
+
+def _signed_in_claims(
+    email: str | None = "u@example.com", username: str | None = "1020010", access_token: str | None = "acc.tok.jwt"
+) -> dict:
+    claims = _claims(email=email, username=username)
+    if access_token is not None:
+        claims[UPSTREAM_CLAIMS_KEY][ACCESS_TOKEN_CLAIM] = access_token
+    return claims
 
 
 class _Tok:
@@ -115,12 +127,12 @@ async def test_build_mints_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     """No cached key → mint once, cache it, return a Bearer client."""
     monkeypatch.delenv("MCP_OAUTH_STORAGE_URL", raising=False)
     apitoken._memory_cache.clear()
-    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_claims(email="new@example.com")))
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(email="new@example.com")))
     monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", "http://outline:3000")
 
     minted: list[tuple[str, str]] = []
 
-    async def _fake_mint(email: str, url: str, access_token: str | None = None) -> str:
+    async def _fake_mint(email: str, url: str, proof: MintProof | None = None) -> str:
         minted.append((email, url))
         return "ol_api_minted"
 
@@ -136,7 +148,7 @@ async def test_build_mints_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_build_fails_closed_when_mint_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MCP_OAUTH_STORAGE_URL", raising=False)
     apitoken._memory_cache.clear()
-    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_claims(email="fail@example.com")))
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(email="fail@example.com")))
     monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", "http://outline:3000")
 
     async def _fail_mint(*_a, **_k):
@@ -164,7 +176,7 @@ async def test_mint_creates_self_expiring_key(monkeypatch: pytest.MonkeyPatch) -
             return {"data": {"id": "new1", "value": "ol_api_fresh"}}
 
     monkeypatch.setattr(apitoken, "OutlineClient", _FakeClient)
-    value = await apitoken._mint("user@example.com", "http://outline:3000")
+    value = await apitoken._mint("user@example.com", "http://outline:3000", PROOF)
     assert value == "ol_api_fresh"
     assert [c[0] for c in calls] == ["apiKeys.create"]
     body = calls[0][1]
@@ -179,14 +191,16 @@ async def test_concurrent_get_or_mint_mints_once(monkeypatch: pytest.MonkeyPatch
     apitoken._locks.clear()
     mint_count = 0
 
-    async def _slow_mint(email: str, url: str, access_token: str | None = None) -> str:
+    async def _slow_mint(email: str, url: str, proof: MintProof | None = None) -> str:
         nonlocal mint_count
         mint_count += 1
         await asyncio.sleep(0.01)  # widen the race window
         return "ol_api_once"
 
     monkeypatch.setattr(apitoken, "_mint", _slow_mint)
-    results = await asyncio.gather(*[apitoken._get_or_mint("same@user.com", "http://outline:3000") for _ in range(8)])
+    results = await asyncio.gather(
+        *[apitoken._get_or_mint("same@user.com", "http://outline:3000", PROOF) for _ in range(8)]
+    )
     assert results == ["ol_api_once"] * 8
     assert mint_count == 1  # the 7 others cache-hit on the double-check
 
@@ -256,7 +270,7 @@ async def test_mint_does_not_replay_accesstoken_cookie_across_retry(
 
     # Inject only the transport; the real _isolated_http_client's follow_redirects
     # and the real post() retry/clear logic are what we're testing.
-    key = await apitoken._mint("u@example.com", "http://outline:3000", transport=httpx.MockTransport(handler))
+    key = await apitoken._mint("u@example.com", "http://outline:3000", PROOF, transport=httpx.MockTransport(handler))
 
     assert key == "ol_api_minted"
     assert calls["n"] == 2  # retried once after the 429
@@ -281,7 +295,7 @@ def test_upstream_access_token_for_reads_claim() -> None:
     assert upstream_access_token_for({}) is None
 
 
-async def _capture_mint_headers(monkeypatch: pytest.MonkeyPatch, access_token: str | None) -> dict[str, str]:
+async def _capture_mint_headers() -> dict[str, str]:
     """Run _mint through a MockTransport and return the request headers seen."""
     import httpx
 
@@ -291,51 +305,74 @@ async def _capture_mint_headers(monkeypatch: pytest.MonkeyPatch, access_token: s
         captured.update(request.headers)
         return httpx.Response(200, json={"data": {"value": "ol_api_minted"}})
 
-    key = await apitoken._mint(
-        "u@example.com", "http://outline:3000", access_token, transport=httpx.MockTransport(handler)
-    )
+    key = await apitoken._mint("u@example.com", "http://outline:3000", PROOF, transport=httpx.MockTransport(handler))
     assert key == "ol_api_minted"
     return captured
 
 
-async def test_mint_forwards_access_token_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression (1b): the mint forwards X-Auth-Request-Access-Token so Outline's
-    corporate-ID gate accepts it, alongside the identity header."""
-    headers = await _capture_mint_headers(monkeypatch, "acc.tok.jwt")
+async def test_mint_binds_the_email_to_the_token_and_username() -> None:
+    """FOSS-836: Outline binds X-Auth-Request-Email to the verified access token
+    through X-Auth-Request-Preferred-Username, so the mint sends all three."""
+    headers = await _capture_mint_headers()
     assert headers.get("x-auth-request-email") == "u@example.com"
+    assert headers.get("x-auth-request-preferred-username") == "1020010"
     assert headers.get("x-auth-request-access-token") == "acc.tok.jwt"
 
 
-async def test_mint_omits_access_token_header_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No access token → no X-Auth-Request-Access-Token header (non-corporate or
-    non-Cognito deployments are unaffected)."""
-    headers = await _capture_mint_headers(monkeypatch, None)
-    assert headers.get("x-auth-request-email") == "u@example.com"
-    assert "x-auth-request-access-token" not in headers
+def test_mint_proof_needs_username_and_access_token() -> None:
+    assert mint_proof_for(_signed_in_claims()) == PROOF
+    assert mint_proof_for(_signed_in_claims(username=None)) is None
+    assert mint_proof_for(_signed_in_claims(access_token=None)) is None
+    assert mint_proof_for(None) is None
+    assert "acc.tok.jwt" not in repr(PROOF)
 
 
-async def test_build_threads_access_token_to_mint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """build_outline_client resolves the access token from claims and passes it
-    to the mint (not into the cache key)."""
-    from outline_mcp.moneta.cognito import ACCESS_TOKEN_CLAIM
-
+@pytest.mark.parametrize("missing", ["username", "access_token"])
+async def test_build_refuses_to_mint_without_proof(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+    """No access token or no cognito:username: no unauthenticated mint is sent."""
     monkeypatch.delenv("MCP_OAUTH_STORAGE_URL", raising=False)
     apitoken._memory_cache.clear()
-    claims = _claims(email="corp@example.com")
-    claims[UPSTREAM_CLAIMS_KEY][ACCESS_TOKEN_CLAIM] = "acc.tok.jwt"
-    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(claims))
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(**{missing: None})))
     monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", "http://outline:3000")
 
-    seen: dict[str, str | None] = {}
+    async def _boom(*_a, **_k):
+        raise AssertionError("must not mint without a proof")
 
-    async def _fake_mint(email: str, url: str, access_token: str | None = None) -> str:
-        seen["access_token"] = access_token
+    monkeypatch.setattr(apitoken, "_mint", _boom)
+    with pytest.raises(apitoken.MintProofMissingError, match="Sign in to the MCP connector again"):
+        await apitoken.build_outline_client()
+
+
+async def test_build_without_proof_still_uses_a_cached_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MCP_OAUTH_STORAGE_URL", raising=False)
+    apitoken._memory_cache.clear()
+    apitoken._cache_set("u@example.com", "ol_api_cached")
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(access_token=None)))
+    monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", "http://outline:3000")
+
+    client = await apitoken.build_outline_client()
+    assert client._auth_header_dict() == {"Authorization": "Bearer ol_api_cached"}
+
+
+async def test_build_threads_the_proof_to_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_outline_client resolves the proof from claims and passes it to the
+    mint (not into the cache key)."""
+    monkeypatch.delenv("MCP_OAUTH_STORAGE_URL", raising=False)
+    apitoken._memory_cache.clear()
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(email="corp@example.com")))
+    monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", "http://outline:3000")
+
+    seen: dict[str, MintProof | None] = {}
+
+    async def _fake_mint(email: str, url: str, proof: MintProof | None = None) -> str:
+        seen["proof"] = proof
         return "ol_api_minted"
 
     monkeypatch.setattr(apitoken, "_mint", _fake_mint)
     client = await apitoken.build_outline_client()
     assert client._auth_header_dict() == {"Authorization": "Bearer ol_api_minted"}
-    assert seen["access_token"] == "acc.tok.jwt"
+    assert seen["proof"] == PROOF
+    assert apitoken._cache_get("corp@example.com") == "ol_api_minted"
 
 
 async def test_extract_upstream_claims_gates_the_access_token() -> None:

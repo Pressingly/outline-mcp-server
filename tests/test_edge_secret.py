@@ -16,7 +16,7 @@ from outline_mcp.moneta.edge import (
     reject_trust_headers,
     usable_edge_secret,
 )
-from tests.test_moneta import _claims, _Tok
+from tests.test_moneta import PROOF, _claims, _signed_in_claims, _Tok
 
 SECRET = "s" * 40
 INTERNAL_URL = "http://outline:3000"
@@ -78,14 +78,15 @@ async def test_mint_sends_the_trimmed_edge_secret_with_the_identity(monkeypatch:
     monkeypatch.setenv("OUTLINE_EDGE_SECRET", f" {SECRET} ")
     outline = _Recorder(_minted())
 
-    key = await apitoken._mint("u@example.com", INTERNAL_URL, "cognito-at", transport=outline.transport)
+    key = await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport)
 
     assert key == "ol_api_fresh"
     [request] = outline.requests
     assert request.url == "http://outline:3000/api/apiKeys.create"
     assert request.headers[EDGE_SECRET_HEADER] == SECRET
     assert request.headers["X-Auth-Request-Email"] == "u@example.com"
-    assert request.headers["X-Auth-Request-Access-Token"] == "cognito-at"
+    assert request.headers["X-Auth-Request-Access-Token"] == "acc.tok.jwt"
+    assert request.headers["X-Auth-Request-Preferred-Username"] == "1020010"
     assert "authorization" not in request.headers
 
 
@@ -94,7 +95,7 @@ async def test_mint_leaves_an_unusable_secret_out(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("OUTLINE_EDGE_SECRET", secret)
     outline = _Recorder(_minted())
 
-    assert await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport) == "ol_api_fresh"
+    assert await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport) == "ol_api_fresh"
     assert EDGE_SECRET_HEADER not in outline.requests[0].headers
 
 
@@ -102,7 +103,7 @@ async def test_ignored_headers_without_a_secret_name_the_missing_secret() -> Non
     outline = _Recorder(_outline_error(401, "Authentication required"))
 
     with pytest.raises(apitoken.EdgeSecretMissingError, match="OUTLINE_EDGE_SECRET is unset.*AUTH_TYPE=sso"):
-        await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport)
+        await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport)
 
 
 async def test_ignored_headers_with_a_secret_name_the_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,7 +111,7 @@ async def test_ignored_headers_with_a_secret_name_the_mismatch(monkeypatch: pyte
     outline = _Recorder(_outline_error(401, "Authentication required"))
 
     with pytest.raises(apitoken.EdgeSecretRejectedError, match="matches Outline's MPASS_EDGE_SECRET") as raised:
-        await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport)
+        await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport)
     assert SECRET not in str(raised.value)
 
 
@@ -119,7 +120,7 @@ async def test_corporate_gate_refusal_is_named(monkeypatch: pytest.MonkeyPatch) 
     outline = _Recorder(_outline_error(401, "Access denied"))
 
     with pytest.raises(apitoken.CorporateGateError, match="corporate-ID gate"):
-        await apitoken._mint("u@example.com", INTERNAL_URL, "cognito-at", transport=outline.transport)
+        await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport)
 
 
 @pytest.mark.parametrize(
@@ -133,21 +134,21 @@ async def test_corporate_gate_refusal_is_named(monkeypatch: pytest.MonkeyPatch) 
 async def test_other_mint_failures_stay_generic(response: httpx.Response) -> None:
     outline = _Recorder(response)
 
-    assert await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport) is None
+    assert await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport) is None
 
 
 async def test_mint_never_follows_a_redirect_with_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUTLINE_EDGE_SECRET", SECRET)
     outline = _Recorder(httpx.Response(307, headers={"Location": "https://elsewhere.example/api/apiKeys.create"}))
 
-    assert await apitoken._mint("u@example.com", INTERNAL_URL, transport=outline.transport) is None
+    assert await apitoken._mint("u@example.com", INTERNAL_URL, PROOF, transport=outline.transport) is None
     assert [request.url.host for request in outline.requests] == ["outline"]
 
 
 async def test_edge_refusal_keeps_cached_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUTLINE_INTERNAL_BASE_URL", INTERNAL_URL)
     apitoken._cache_set("other@example.com", "ol_api_other")
-    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_claims(email="new@example.com")))
+    monkeypatch.setattr(apitoken, "stored_access_token", lambda: _Tok(_signed_in_claims(email="new@example.com")))
 
     async def _refused(*_args, **_kwargs):
         raise apitoken.EdgeSecretMissingError()

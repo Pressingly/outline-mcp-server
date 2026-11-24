@@ -17,6 +17,7 @@ then use the minted key as a Bearer.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp.server.auth.auth import AccessToken
@@ -106,3 +107,36 @@ def upstream_access_token_for(claims: dict[str, Any] | None) -> str | None:
     if isinstance(access_token, str) and access_token:
         return access_token
     return None
+
+
+@dataclass(frozen=True)
+class MintProof:
+    """What Outline binds the mint's ``X-Auth-Request-Email`` to (FOSS-836).
+
+    ``username`` is the id token's ``cognito:username``, sent as
+    ``X-Auth-Request-Preferred-Username``; Outline requires it to equal the
+    ``username`` claim of ``access_token``, the verified Cognito access token
+    sent as ``X-Auth-Request-Access-Token``.
+    """
+
+    username: str
+    access_token: str = field(repr=False)
+
+
+def _upstream_text(claims: dict[str, Any] | None, key: str) -> str | None:
+    if not claims:
+        return None
+    upstream = claims.get(UPSTREAM_CLAIMS_KEY)
+    if not isinstance(upstream, dict):
+        return None
+    value = upstream.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def mint_proof_for(claims: dict[str, Any] | None) -> MintProof | None:
+    """The username and access token the mint must carry, or ``None`` when either is missing."""
+    username = _upstream_text(claims, COGNITO_USERNAME_CLAIM)
+    access_token = upstream_access_token_for(claims)
+    if username is None or access_token is None:
+        return None
+    return MintProof(username=username, access_token=access_token)
