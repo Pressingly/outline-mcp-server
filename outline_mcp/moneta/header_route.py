@@ -22,6 +22,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+from collections.abc import Mapping
 from contextvars import ContextVar
 
 import httpx
@@ -29,6 +30,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from outline_mcp.client import OutlineClientError
 from outline_mcp.moneta.apitoken import steady_state_http_client
 from outline_mcp.outline_client import OutlineClient, _sanitize_value
 
@@ -36,7 +38,7 @@ logger = logging.getLogger("fastmcp.outline_mcp.moneta.header_route")
 
 HEADER_API_URL_ENV = "OUTLINE_HEADER_INTERNAL_BASE_URL"
 API_KEY_HEADER = "x-outline-api-key"
-FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host")
+FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
 KEY_CHECK_TIMEOUT_SECONDS = 5.0
 SCOPE_REFUSAL_ERROR = "authorization_error"
 
@@ -60,6 +62,24 @@ def internal_route_enabled() -> bool:
     return bool(os.getenv(HEADER_API_URL_ENV, "").strip())
 
 
+def came_through_a_proxy(headers: Mapping[str, str]) -> bool:
+    lowered = {name.lower() for name in headers}
+    return any(name in lowered for name in FORWARDED_HEADERS)
+
+
+def refuses_proxied_caller(headers: Mapping[str, str]) -> bool:
+    return internal_route_enabled() and came_through_a_proxy(headers)
+
+
+def _request_headers() -> Mapping[str, str]:
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        return get_http_headers(include_all=True) or {}
+    except (RuntimeError, LookupError):
+        return {}
+
+
 def _key_client(api_key: str) -> OutlineClient:
     return OutlineClient(api_key=api_key, api_url=header_api_url(), http_client=steady_state_http_client())
 
@@ -72,8 +92,19 @@ def header_client(api_key: str | None) -> OutlineClient | None:
     keep the public ``OUTLINE_API_URL``. It uses the cookie-refusing
     steady-state client, so one caller's Outline session cookie is never
     replayed for another caller's key.
+
+    Wherever header mode runs, a proxied caller is refused while the internal
+    URL is configured, even where no gate stands in front of the route.
+
+    Raises:
+        OutlineClientError: For a header key from a proxied caller while the route is private.
     """
-    if not api_key or not _passed_gate.get():
+    if not api_key:
+        return None
+    if refuses_proxied_caller(_request_headers()):
+        logger.warning("header key refused: the API-key route is internal to the bundle")
+        raise OutlineClientError("The API-key route is internal to the bundle.")
+    if not _passed_gate.get():
         return None
     return _key_client(api_key)
 
@@ -134,7 +165,7 @@ async def check_key(api_key: str) -> KeyCheck:
 
 
 async def check_request(headers: Headers) -> KeyCheck:
-    if internal_route_enabled() and any(name in headers for name in FORWARDED_HEADERS):
+    if refuses_proxied_caller(headers):
         return KeyCheck.PROXIED
     keys = headers.getlist(API_KEY_HEADER)
     if len(keys) > 1:

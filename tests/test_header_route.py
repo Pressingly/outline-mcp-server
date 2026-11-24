@@ -22,6 +22,7 @@ from outline_mcp.server import get_http_mcp
 PUBLIC_API_URL = "https://docs.example.com/api"
 INTERNAL_URL = "http://outline:3000"
 KEY = "ol_api_user_key"
+FORWARDED = [name.title() for name in header_route.FORWARDED_HEADERS]
 
 
 class _Outline:
@@ -208,7 +209,7 @@ async def test_gate_answers_503_when_outline_is_down(outline: _Outline) -> None:
     assert "WWW-Authenticate" not in response.headers
 
 
-@pytest.mark.parametrize("forwarded", ["X-Forwarded-For", "X-Forwarded-Host"])
+@pytest.mark.parametrize("forwarded", FORWARDED)
 async def test_gate_refuses_proxied_callers_when_the_route_is_internal(outline: _Outline, forwarded: str) -> None:
     response = await _post(_gated_app(), [("x-outline-api-key", KEY), (forwarded, "203.0.113.7")])
     assert response.status_code == 403
@@ -253,11 +254,17 @@ def _outline_calls(outline: _Outline) -> list[str]:
     return [str(request.url) for request in outline.requests if not request.url.path.endswith("/auth.info")]
 
 
-async def _call_tool(app: Starlette, path: str) -> httpx.Response:
+async def _call_tool(app: Starlette, path: str, extra: list[tuple[str, str]] | None = None) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
+    headers = [("x-outline-api-key", KEY), MCP_ACCEPT, *(extra or [])]
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=transport, base_url="http://outline-mcp:8213") as caller:
-            return await caller.post(path, headers=[("x-outline-api-key", KEY), MCP_ACCEPT], json=TOOL_CALL)
+            return await caller.post(path, headers=headers, json=TOOL_CALL)
+
+
+def _ungated_app() -> Starlette:
+    http_app = get_http_mcp().http_app(stateless_http=True)
+    return Starlette(routes=[Mount("/", app=http_app)], lifespan=http_app.lifespan)
 
 
 async def test_gated_tool_call_reaches_the_internal_url(outline: _Outline, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,10 +288,8 @@ async def test_ungated_http_mode_keeps_the_public_url(monkeypatch: pytest.Monkey
         return {"data": []}
 
     monkeypatch.setattr(client_module.OutlineClient, "post", record_public_call)
-    http_app = get_http_mcp().http_app(stateless_http=True)
-    app = Starlette(routes=[Mount("/", app=http_app)], lifespan=http_app.lifespan)
     assert moneta_http.enabled() is False
-    response = await _call_tool(app, "/mcp")
+    response = await _call_tool(_ungated_app(), "/mcp")
     assert response.status_code == 200
     assert public_calls == [f"{PUBLIC_API_URL}/collections.list"]
 
@@ -297,3 +302,21 @@ def test_startup_warns_when_the_internal_url_cannot_be_used(
     with caplog.at_level("WARNING", logger=moneta_http.logger.name):
         assert moneta_http.enabled() is False
     assert header_route.HEADER_API_URL_ENV in caplog.text
+
+
+@pytest.mark.parametrize("forwarded", FORWARDED)
+async def test_ungated_http_mode_refuses_a_proxied_key_while_the_route_is_private(
+    monkeypatch: pytest.MonkeyPatch, forwarded: str
+) -> None:
+    monkeypatch.setenv("COGNITO_USER_POOL_ID", "")
+    calls: list[str] = []
+
+    async def record_call(self, endpoint: str, data: dict | None = None) -> dict:
+        calls.append(f"{self.api_url}/{endpoint}")
+        return {"data": []}
+
+    monkeypatch.setattr(client_module.OutlineClient, "post", record_call)
+    response = await _call_tool(_ungated_app(), "/mcp", [(forwarded, "203.0.113.7")])
+    assert response.status_code == 200
+    assert "internal to the bundle" in response.text
+    assert calls == []
