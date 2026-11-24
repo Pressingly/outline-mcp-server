@@ -290,12 +290,8 @@ async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-def run() -> None:
-    """Validate env, build the Starlette app, and serve it with uvicorn."""
-    validate_env()
-
-    cognito_app = get_cognito_http_mcp().http_app(stateless_http=True)
-    header_app = get_http_mcp().http_app(stateless_http=True)
+def build_app(cognito_app: Starlette, header_app: Starlette) -> Starlette:
+    """The served app: health check, the gated header route, and Cognito OAuth."""
 
     @asynccontextmanager
     async def lifespan(app):
@@ -310,7 +306,7 @@ def run() -> None:
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
             # Per-request x-outline-api-key mode stays available alongside Cognito;
-            # the gate answers 401 for a key Outline rejects.
+            # the gate answers 401 for a key Outline rejects and 403 to proxied callers.
             Mount("/http/api-key", app=HeaderKeyGate(header_app)),
             # AWSCognitoProvider publishes /.well-known/* on the mounted app.
             Mount("/", app=cognito_app),
@@ -323,6 +319,17 @@ def run() -> None:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    return app
+
+
+def run() -> None:
+    """Validate env, build the Starlette app, and serve it with uvicorn."""
+    validate_env()
+
+    app = build_app(
+        get_cognito_http_mcp().http_app(stateless_http=True),
+        get_http_mcp().http_app(stateless_http=True),
     )
 
     _configure_logging()

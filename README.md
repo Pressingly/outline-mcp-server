@@ -21,7 +21,7 @@ documents and collections, comments, attachments, and batch operations.
 |---|---|---|
 | `OUTLINE_API_KEY` | stdio | Outline API key (Settings → API). |
 | `OUTLINE_API_URL` | all | Outline API base URL, e.g. `https://app.getoutline.com/api`. |
-| `OUTLINE_HEADER_INTERNAL_BASE_URL` | optional | Outline base URL for `x-outline-api-key` calls, e.g. `http://outline:3000` inside the bundle. Unset keeps `OUTLINE_API_URL`. Set it only where `/http/api-key` is not publicly routed. Document links still use `OUTLINE_API_URL`. |
+| `OUTLINE_HEADER_INTERNAL_BASE_URL` | optional | Outline base URL for `x-outline-api-key` calls, e.g. `http://outline:3000` inside the bundle. Unset keeps `OUTLINE_API_URL`. Set it only where `/http/api-key` is not publicly routed; while it is set the route also answers 403 to any request carrying `X-Forwarded-For` or `X-Forwarded-Host`. Document links still use `OUTLINE_API_URL`. |
 | `OUTLINE_READ_ONLY` | optional | `true` to register read-only tools only. |
 | `OUTLINE_DISABLE_AI_TOOLS` | optional | `true` to skip the AI `ask_ai_about_documents` tool. |
 | `OUTLINE_ENABLE_DELETE` | optional | Opt-in. Defaults to **false** — `delete_document`, `delete_collection` and `batch_delete_documents` are not registered unless this is `true`. |
